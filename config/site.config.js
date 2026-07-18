@@ -14,7 +14,7 @@
  *   AUTOCLAW_TITLE_KEYWORDS    标题关键词，可用 | 、 、 , 分隔，默认 万年移民
  */
 
-const { DEFAULT_ANTHROPIC, DEFAULT_STRATEGY } = require('./defaults');
+const { DEFAULT_ANTHROPIC, DEFAULT_STRATEGY, DEFAULT_HUMANIZE } = require('./defaults');
 
 /**
  * 把原始字符串按 | 、 、 ,（含全角逗号 ，）拆成去空白的非空数组。
@@ -38,5 +38,6 @@ module.exports = {
   // 透出 anthropic / strategy 默认值，便于单一入口引用
   DEFAULT_ANTHROPIC,
   DEFAULT_STRATEGY,
+  DEFAULT_HUMANIZE,
   splitList,
 };

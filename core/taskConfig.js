@@ -17,7 +17,7 @@
 
 const crypto = require('crypto');
 const { splitTokens, ERR, TaskStatus } = require('./progressEvent');
-const { DEFAULT_TARGET, DEFAULT_ANTHROPIC, DEFAULT_STRATEGY } = require('../config/site.config');
+const { DEFAULT_TARGET, DEFAULT_ANTHROPIC, DEFAULT_STRATEGY, DEFAULT_HUMANIZE } = require('../config/site.config');
 
 /** 平台固定顺序：保证串行时百度先于谷歌 */
 const PLATFORM_ORDER = ['baidu', 'google'];
@@ -117,6 +117,9 @@ function buildTaskConfig(payload) {
   // --- 拟人参数（浅合并默认值，前端可覆盖）---
   const anthropic = Object.assign({}, DEFAULT_ANTHROPIC, sanitizeAnthropic(payload.anthropic));
 
+  // --- 拟人微动作（步骤间随机停顿+随机动作，浅合并默认值）---
+  const humanize = Object.assign({}, DEFAULT_HUMANIZE, sanitizeHumanize(payload.humanize));
+
   // --- 策略参数（浅合并默认值）---
   const strategy = Object.assign({}, DEFAULT_STRATEGY, sanitizeStrategy(payload.strategy));
   if (strategy.mode !== 'concurrent') {
@@ -138,6 +141,7 @@ function buildTaskConfig(payload) {
     keywords: keywords,
     target: { domain: domain, titleKeywords: titleKeywords, browseAnchor: browseAnchor },
     anthropic: anthropic,
+    humanize: humanize,
     strategy: strategy,
     proxy: proxy,
     clientId: clientId,
@@ -153,6 +157,19 @@ function sanitizeAnthropic(raw) {
   if (!raw || typeof raw !== 'object') return out;
   const keys = ['staySeconds', 'scrollUp', 'scrollDown', 'ampMin', 'ampMax', 'intervalMin', 'intervalMax'];
   for (const k of keys) {
+    const v = Number(raw[k]);
+    if (Number.isFinite(v) && raw[k] !== '' && raw[k] != null) out[k] = v;
+  }
+  return out;
+}
+
+/** 仅保留合法的拟人微动作字段（enabled 为布尔，其余为数值权重） */
+function sanitizeHumanize(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
+  const nums = ['minMs', 'maxMs', 'jitterAmp', 'moveProb', 'scrollProb', 'hoverProb', 'wheelAmp'];
+  for (const k of nums) {
     const v = Number(raw[k]);
     if (Number.isFinite(v) && raw[k] !== '' && raw[k] != null) out[k] = v;
   }

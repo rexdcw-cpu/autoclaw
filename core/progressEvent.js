@@ -40,6 +40,7 @@ const StepName = {
   ENTER: 'enter', // 点击进入目标站
   STAY: 'stay', // 目标页停留（拟人计时）
   BROWSE: 'browse', // 站内拟人浏览（找联系/关于 + 滚动）
+  HUMAN: 'human', // 步骤间拟人微动作（随机停顿 + 随机微动作）
   CLOSE: 'close', // 关闭目标页，进入下一轮
 };
 

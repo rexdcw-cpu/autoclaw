@@ -53,7 +53,33 @@ const DEFAULT_STRATEGY = {
   actionTimeoutMs: num(process.env.AUTOCLAW_ACTION_TIMEOUT, 150000),
 };
 
+/**
+ * 拟人微动作（humanize）：在每个关键步骤之间插入「随机思考停顿 + 随机微动作」，
+ * 让连续操作更不可预测，降低被搜索引擎风控的概率。
+ *
+ * - 停顿时长 = randInt(minMs, maxMs) + randInt(0, jitterAmp)，每次随机。
+ * - 微动作三选一（概率归一化）：移动鼠标 / 滚轮轻推 / 悬停或按键。
+ * - 任何微动作失败都静默忽略，绝不影响主流程。
+ */
+const DEFAULT_HUMANIZE = {
+  // 总开关
+  enabled: (process.env.AUTOCLAW_HUMANIZE_ENABLED || 'true').toLowerCase() !== 'false',
+  // 随机思考停顿下限（ms）
+  minMs: num(process.env.AUTOCLAW_HUMANIZE_MIN, 800),
+  // 随机思考停顿上限（ms）
+  maxMs: num(process.env.AUTOCLAW_HUMANIZE_MAX, 2600),
+  // 在 [minMs,maxMs] 之上再叠加的随机抖动上限（ms），使间隔更不可预测
+  jitterAmp: num(process.env.AUTOCLAW_HUMANIZE_JITTER, 400),
+  // 三类微动作的触发权重（内部归一化，不必和为 1）
+  moveProb: num(process.env.AUTOCLAW_HUMANIZE_MOVE, 0.6),
+  scrollProb: num(process.env.AUTOCLAW_HUMANIZE_SCROLL, 0.25),
+  hoverProb: num(process.env.AUTOCLAW_HUMANIZE_HOVER, 0.15),
+  // 滚轮轻推幅度（px，可正可负）
+  wheelAmp: num(process.env.AUTOCLAW_HUMANIZE_WHEEL, 120),
+};
+
 module.exports = {
   DEFAULT_ANTHROPIC,
   DEFAULT_STRATEGY,
+  DEFAULT_HUMANIZE,
 };

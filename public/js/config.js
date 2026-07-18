@@ -86,6 +86,17 @@
       },
     );
 
+    // --- 拟人微动作（步骤间随机停顿+随机动作，有值才覆盖默认值）---
+    var humanizeEnabled = document.getElementById('humanize-enabled');
+    var humanize = {};
+    if (humanizeEnabled && !humanizeEnabled.checked) humanize.enabled = false;
+    ['humanize-min', 'humanize-max'].forEach(function (k) {
+      var v = numOrNull(k);
+      if (v !== undefined) {
+        humanize[k === 'humanize-min' ? 'minMs' : 'maxMs'] = v;
+      }
+    });
+
     var mode = document.getElementById('mode').value;
     var clientId = document.getElementById('clientId').value.trim();
 
@@ -96,6 +107,7 @@
       titleKeywords: titleKeywords,
       browseAnchor: browseAnchor,
       anthropic: anthropic,
+      humanize: humanize,
       strategy: { mode: mode },
     };
     if (clientId) payload.clientId = clientId;
@@ -189,6 +201,11 @@
     ['staySeconds', 'scrollUp', 'scrollDown', 'ampMin', 'ampMax', 'intervalMin', 'intervalMax'].forEach(function (k) {
       if (a[k] != null) { var el = document.getElementById(k); if (el) el.value = a[k]; }
     });
+    var hz = item.humanize || {};
+    var hzEnabled = document.getElementById('humanize-enabled');
+    if (hzEnabled) hzEnabled.checked = hz.enabled !== false;
+    if (hz.minMs != null) { var mn = document.getElementById('humanize-min'); if (mn) mn.value = hz.minMs; }
+    if (hz.maxMs != null) { var mx = document.getElementById('humanize-max'); if (mx) mx.value = hz.maxMs; }
     if (item.runMode) { var m = document.getElementById('mode'); if (m) m.value = item.runMode; }
     var cb = document.getElementById('clientId');
     if (cb) cb.value = item.clientId || '';

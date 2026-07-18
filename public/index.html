@@ -92,6 +92,27 @@
           </div>
         </fieldset>
 
+        <!-- 拟人微动作（每步随机停顿+随机动作，降低被风控概率） -->
+        <fieldset class="field">
+          <legend>拟人微动作（步骤间）</legend>
+          <div class="row">
+            <div class="col" style="flex:0 0 auto">
+              <label class="check"><input type="checkbox" id="humanize-enabled" name="humanize-enabled" checked /> 启用每步拟人微动作</label>
+            </div>
+          </div>
+          <div class="row">
+            <div class="col">
+              <label for="humanize-min">最短停顿(ms)</label>
+              <input type="number" id="humanize-min" name="humanize-min" value="800" min="0" step="100" />
+            </div>
+            <div class="col">
+              <label for="humanize-max">最长停顿(ms)</label>
+              <input type="number" id="humanize-max" name="humanize-max" value="2600" min="0" step="100" />
+            </div>
+          </div>
+          <small class="hint">每个关键步骤之间插入一次随机「思考停顿（最短~最长 + 随机抖动）+ 随机微动作（移动鼠标 / 滚动 / 悬停按键）」，让连续操作更不可预测。可在后端用 AUTOCLAW_HUMANIZE_* 环境变量统一覆盖。</small>
+        </fieldset>
+
         <!-- 令牌（决策 A3） -->
         <div class="field">
           <label for="token">访问令牌（token）</label>

@@ -48,6 +48,7 @@
     enter: '进入',
     stay: '停留',
     browse: '浏览',
+    human: '拟人',
     close: '关闭',
   };
   var STATUS_LABEL = {

@@ -63,6 +63,17 @@ function randFloat(min, max) {
   return min + Math.random() * (max - min);
 }
 
+/** 拟人微动作的中文描述（用于进度事件 detail） */
+const HUMAN_DETAIL = {
+  move: '移动鼠标',
+  wheel: '滚动滚轮',
+  hover: '悬停/按键',
+  idle: '随机停顿',
+  failed: '随机停顿（动作跳过）',
+  disabled: '已禁用',
+  noop: '跳过',
+};
+
 class TaskEngine {
   /**
    * @param {object} config TaskConfig（来自 core/taskConfig.buildTaskConfig）
@@ -210,6 +221,11 @@ class TaskEngine {
         round.error = ERR.ERR_ADAPTER_FAIL;
       }
 
+      // 步骤间拟人微动作（search → locate）
+      if (roundSuccess) {
+        await this._betweenSteps(page, round, taskId);
+      }
+
       // --- 2. LOCATE（结果页双匹配）---
       let href = null;
       if (roundSuccess) {
@@ -223,6 +239,11 @@ class TaskEngine {
           roundSuccess = false;
           round.error = ERR.ERR_NO_TARGET;
         }
+
+        // 步骤间拟人微动作（locate → enter）
+        if (roundSuccess) {
+          await this._betweenSteps(page, round, taskId);
+        }
       }
 
       // --- 3. ENTER（进入目标站）---
@@ -235,6 +256,11 @@ class TaskEngine {
         if (enterStep.status === StepStatus.FAILED) {
           roundSuccess = false;
           round.error = ERR.ERR_ADAPTER_FAIL;
+        }
+
+        // 步骤间拟人微动作（enter → stay）
+        if (roundSuccess) {
+          await this._betweenSteps(page, round, taskId);
         }
       }
 
@@ -250,6 +276,11 @@ class TaskEngine {
         this.emit(P.makeProgress({ taskId, type: EventType.STEP, round, step: stayStep, stats: this._makeStats() }));
       }
 
+      // 步骤间拟人微动作（stay → browse）
+      if (roundSuccess) {
+        await this._betweenSteps(page, round, taskId);
+      }
+
       // --- 5. BROWSE（站内拟人浏览，软步骤）---
       if (roundSuccess) {
         const browseStep = await this._softStep(
@@ -260,6 +291,11 @@ class TaskEngine {
           '站内浏览完成',
         );
         this.emit(P.makeProgress({ taskId, type: EventType.STEP, round, step: browseStep, stats: this._makeStats() }));
+      }
+
+      // 步骤间拟人微动作（browse → close，页面仍打开）
+      if (roundSuccess) {
+        await this._betweenSteps(page, round, taskId);
       }
     } catch (e) {
       // 防御性：未预期异常也判本轮失败
@@ -373,6 +409,124 @@ class TaskEngine {
       await page.mouse.wheel(0, dir * amp);
       const iv = randFloat(a.intervalMin, a.intervalMax);
       await sleep(Math.round(iv * 1000));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 拟人微动作（步骤之间随机停顿 + 随机微动作，降低被风控概率）
+  // -------------------------------------------------------------------------
+
+  /** 可被子类/测试覆盖的停顿（默认真实 setTimeout，测试可替换为即时） */
+  _sleep(ms) {
+    return sleep(ms);
+  }
+
+  /**
+   * 步骤之间插入一次「拟人微动作」：先随机思考停顿，再随机做一次微动作。
+   * 任何异常都静默吞掉，绝不影响主流程。
+   * @param {import('playwright').Page} page
+   * @returns {Promise<{thinkMs:number, action:string}>}
+   *   action: 'move' | 'wheel' | 'hover' | 'idle' | 'failed' | 'disabled' | 'noop'
+   */
+  async _humanInterstitial(page) {
+    const h = this.config.humanize || {};
+    if (h.enabled === false) return { thinkMs: 0, action: 'disabled' };
+    if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+      return { thinkMs: 0, action: 'noop' };
+    }
+    const minMs = h.minMs != null ? h.minMs : 800;
+    const maxMs = h.maxMs != null ? h.maxMs : 2600;
+    const jitterAmp = h.jitterAmp != null ? h.jitterAmp : 400;
+    const thinkMs = randInt(minMs, maxMs) + (jitterAmp ? randInt(0, jitterAmp) : 0);
+    let action = 'idle';
+    try {
+      await this._sleep(thinkMs);
+      const moveP = h.moveProb != null ? h.moveProb : 0.6;
+      const scrollP = h.scrollProb != null ? h.scrollProb : 0.25;
+      const hoverP = h.hoverProb != null ? h.hoverProb : 0.15;
+      const total = moveP + scrollP + hoverP;
+      if (total <= 0) return { thinkMs, action: 'idle' };
+      const r = Math.random() * total;
+      if (r < moveP) {
+        await this._humanMove(page, h);
+        action = 'move';
+      } else if (r < moveP + scrollP) {
+        await this._humanWheel(page, h);
+        action = 'wheel';
+      } else {
+        await this._humanHoverOrKey(page, h);
+        action = 'hover';
+      }
+    } catch (e) {
+      // 拟人动作失败绝不影响主流程
+      action = 'failed';
+    }
+    return { thinkMs, action };
+  }
+
+  /**
+   * 步骤之间发射一条 HUMAN 进度事件（便于看板观察拟人节奏）。
+   * 若 humanize 被禁用则不发射，避免噪音。
+   */
+  async _betweenSteps(page, round, taskId) {
+    const h = this.config.humanize || {};
+    if (h.enabled === false) return;
+    const hu = await this._humanInterstitial(page);
+    const detail = HUMAN_DETAIL[hu.action] || hu.action;
+    this.emit(
+      P.makeProgress({
+        taskId,
+        type: EventType.STEP,
+        round,
+        step: P.makeStep(StepName.HUMAN, StepStatus.SUCCESS, detail + '（停顿 ' + hu.thinkMs + 'ms）'),
+        stats: this._makeStats(),
+      }),
+    );
+  }
+
+  /** 取视口尺寸（兼容 headless / 持久化 Chrome；取不到则回退默认值） */
+  async _viewport(page) {
+    try {
+      let vp = typeof page.viewportSize === 'function' ? page.viewportSize() : null;
+      if (!vp || !vp.width) {
+        vp = await page.evaluate(() => ({
+          width: window.innerWidth || 1280,
+          height: window.innerHeight || 800,
+        }));
+      }
+      return vp && vp.width ? vp : { width: 1280, height: 800 };
+    } catch (e) {
+      return { width: 1280, height: 800 };
+    }
+  }
+
+  /** 拟人：分两段曲线移动鼠标到视口内随机点 */
+  async _humanMove(page, h) {
+    const vp = await this._viewport(page);
+    const x = randInt(0, vp.width);
+    const y = randInt(0, vp.height);
+    await page.mouse.move(x * 0.3, y * 0.3, { steps: randInt(2, 6) });
+    await page.mouse.move(x, y, { steps: randInt(3, 10) });
+  }
+
+  /** 拟人：随机方向轻推滚轮 */
+  async _humanWheel(page, h) {
+    const amp = h.wheelAmp != null ? h.wheelAmp : 120;
+    const dy = randInt(-amp, amp);
+    await page.mouse.wheel(0, dy);
+  }
+
+  /** 拟人：随机悬停一个链接，或随机按一个阅读键（PageDown / ArrowDown / End） */
+  async _humanHoverOrKey(page, h) {
+    if (Math.random() < 0.5) {
+      const els = await page.$$('a');
+      if (els && els.length) {
+        const el = els[randInt(0, els.length - 1)];
+        if (typeof el.hover === 'function') await el.hover();
+      }
+    } else {
+      const keys = ['PageDown', 'ArrowDown', 'End'];
+      await page.keyboard.press(keys[randInt(0, keys.length - 1)]);
     }
   }
 

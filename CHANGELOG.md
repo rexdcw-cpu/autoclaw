@@ -4,6 +4,27 @@
 
 ---
 
+## [0.3.0] — 2026-07-18
+
+**里程碑**：流程拟人化增强——每个关键步骤之间插入「随机思考停顿 + 随机微动作」，降低被搜索引擎风控的概率。
+
+### 新增（Features）
+- **拟人微动作（humanize）**：在 search → locate → enter → stay → browse → close 各步骤之间，插入一次随机拟人微动作：
+  - 随机思考停顿：`randInt(minMs, maxMs) + randInt(0, jitterAmp)`，每次随机、不可预测。
+  - 三类微动作按权重随机触发（移动鼠标 / 滚轮轻推 / 悬停或按键），全部静默容错，绝不抛出、不影响主流程。
+  - 进度看板新增 `human` 步骤（标签「拟人」），可见拟人节奏。
+- **配置透传**：`core/taskConfig.js` 解析并浅合并 `payload.humanize`（enabled / minMs / maxMs / jitterAmp / moveProb / scrollProb / hoverProb / wheelAmp），默认值来自 `config/defaults.js` 的 `DEFAULT_HUMANIZE`（支持 `AUTOCLAW_HUMANIZE_*` 环境变量覆盖）。
+- **前端**：`index.html` 增加「拟人微动作（步骤间）」配置块（启用开关 + 最短/最长停顿 ms）；`public/js/config.js` 读取并提交、历史回填。
+
+### 测试
+- 新增 `test/humanizer.test.js`（10 用例）：覆盖随机间隔边界、三类微动作分支、页面关闭/方法抛错的静默容错、enabled=false 早退、taskConfig 透传。
+- 修复：`_humanInterstitial` 的停顿改为可覆盖的 `this._sleep()`（测试即时化），避免大量随机用例拖慢整文件。
+
+### 验证
+- `node --test test/*.test.js` = **213 用例 / 212 通过 / 1 skip**（skip 为真实浏览器 e2e，需 `AUTOCLAW_REAL_BROWSER=1`）。
+
+---
+
 ## [0.2.0] — 2026-07-18
 
 **里程碑**：客户线（P0-8~P0-11）完整落地 + BROWSE 站内锚点相对路径修复（端到端验证通过）。
