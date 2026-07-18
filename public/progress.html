@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>autoclaw · 任务进度</title>
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="page-head">
+        <h1>任务进度 · <span id="task-id">—</span></h1>
+        <a class="link-home" href="/">← 返回配置</a>
+      </header>
+
+      <!-- 告警横幅（熔断/异常时显示） -->
+      <div id="alert-banner" class="alert-banner" hidden></div>
+
+      <!-- 头部状态 -->
+      <section class="card header-card">
+        <div class="stat">
+          <span class="stat-label">整体状态</span>
+          <span id="status" class="stat-value status-running">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">当前轮次</span>
+          <span id="round" class="stat-value">— / —</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">平台</span>
+          <span id="platform" class="stat-value">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">失败率</span>
+          <span id="failrate" class="stat-value">0%</span>
+        </div>
+      </section>
+
+      <!-- 动作日志 -->
+      <section class="card">
+        <div class="log-head">
+          <h2>动作日志（实时）</h2>
+          <span id="conn-state" class="conn-state">连接中…</span>
+        </div>
+        <div id="log" class="log-area"></div>
+      </section>
+
+      <!-- 控制区：运行中显示暂停/停止；终态显示重新提交（无「继续」按钮，决策 A4） -->
+      <section class="actions">
+        <button id="pause-btn" type="button">暂停</button>
+        <button id="stop-btn" type="button" class="danger">停止</button>
+        <a id="resubmit-link" class="btn-link" href="/" hidden>重新提交</a>
+      </section>
+
+      <!-- 历史回看（T-D4 / F-25）：查看其它任务的运行记录时间线 -->
+      <section class="card" id="review-card">
+        <div class="log-head">
+          <h2>历史回看（其它任务运行记录）</h2>
+        </div>
+        <div class="review-bar">
+          <input type="text" id="review-task-id" placeholder="输入要回看的 taskId" />
+          <button id="review-btn" type="button">查看运行记录</button>
+        </div>
+        <p id="review-summary" class="hint" hidden></p>
+        <div id="review-log" class="log-area"></div>
+      </section>
+    </main>
+
+    <!-- socket.io 客户端由服务端自动托管，无需打包 -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/js/progress.js"></script>
+  </body>
+</html>

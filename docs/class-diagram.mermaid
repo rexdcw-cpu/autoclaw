@@ -1,0 +1,72 @@
+classDiagram
+  class BrowserSession {
+    +Browser browser
+    +BrowserContext context
+    +launch(proxy) BrowserContext
+    +newContext() BrowserContext
+    +close() void
+    +healthCheck(ctx) HealthResult
+  }
+  class PlatformAdapter {
+    <<abstract>>
+    +open(page) void
+    +fillAndSubmit(page, keyword) void
+    +waitResults(page, opts) WaitResult
+    +locateTarget(page, target) string|null
+    +clickTarget(page, href) void
+    +stayDwell(page) void
+    +inSiteBrowse(page) void
+    +_doScroll(page) void
+    +_findContactLink(page) string|null
+    +_isCaptchaPage(page) bool
+    +matchTitle(title, kws) bool$
+    +matchHref(href, domain) bool$
+    +resolveFinalUrl(href, timeoutMs) string$
+  }
+  class BaiduAdapter {
+    +open(page) void
+    +fillAndSubmit(page, keyword) void
+    +waitResults(page, opts) WaitResult
+    +locateTarget(page, target) string|null
+    +clickTarget(page, href) void
+  }
+  class GoogleAdapter {
+    +open(page) void
+    +search(page, keyword) void
+    +locateTarget(page, target) string|null
+    +clickTarget(page, href) void
+  }
+  class StepExecutor {
+    +runStep(opts) StepState
+    +runSoftStep(opts) StepState
+  }
+  class StepContext {
+    +string taskId
+    +RoundState round
+    +TaskConfig config
+    +object target
+    +Page page
+    +BrowserContext context
+  }
+  class TaskEngine {
+    +run() TaskStatus
+    +runRound(plan) bool
+  }
+  class DbWriter {
+    +bufferRunLog(event) void
+    +flushRunLog() Promise~void~
+    +flushRunLogSync() void
+    +getRunLogs(taskId, limit) Row[]
+  }
+
+  TaskEngine --> BrowserSession : ① 起会话
+  TaskEngine --> StepExecutor : ⑦ 包裹每步
+  TaskEngine --> BaiduAdapter : ②③④⑤⑥
+  TaskEngine --> GoogleAdapter : ②③④⑤⑥
+  BaiduAdapter --|> PlatformAdapter
+  GoogleAdapter --|> PlatformAdapter
+  StepExecutor ..> DbWriter : emit 到主进程缓冲落库
+  TaskEngine ..> StepContext : 持有并下传
+  note for StepExecutor "runStep=关键步(重试+超时)<br/>runSoftStep=软步(不重试,不阻断)<br/>任一步失败必 emit STEP(failed) 落库"
+  note for BrowserSession "healthCheck 返回 {ok,page?,reason?}<br/>等价于 smoke-launch 断言"
+  note for PlatformAdapter "拟人动作由 taskEngine 下沉至此<br/>适配器只管 DOM 逻辑"

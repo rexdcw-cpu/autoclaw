@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>autoclaw · SEO 自动化控制台</title>
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="page-head">
+        <h1>autoclaw · SEO 自动化控制台</h1>
+        <p class="subtitle">配置搜索平台、关键词与目标站点，启动拟人化点击任务</p>
+      </header>
+
+      <form id="task-form" class="card" novalidate>
+        <!-- 平台 -->
+        <fieldset class="field">
+          <legend>平台（多选）</legend>
+          <label class="check"><input type="checkbox" name="platforms" value="baidu" checked /> 百度</label>
+          <!-- 谷歌半部分：本地仅跑百度（谷歌需 VPN），UI 隐藏并默认不勾选；后端代码未禁用，仍可由 API 提交 -->
+          <label class="check" style="display:none"><input type="checkbox" name="platforms" value="google" /> 谷歌</label>
+        </fieldset>
+
+        <!-- 关键词 -->
+        <div class="field">
+          <label for="keywords">搜索关键词（用 <code>|</code> 分隔，可多行）</label>
+          <textarea id="keywords" name="keywords" rows="4" placeholder="万年移民|移民公司|移民中介">万年移民|移民公司|移民中介</textarea>
+          <small class="hint">支持分隔符：<code>|</code> 、 <code>、</code> 、 <code>,</code></small>
+        </div>
+
+        <!-- 目标站点（决策 A1：必填） -->
+        <fieldset class="field target">
+          <legend>目标站点（必填）</legend>
+          <div class="row">
+            <div class="col">
+              <label for="targetDomain">目标域名 targetDomain</label>
+              <input type="text" id="targetDomain" name="targetDomain" placeholder="manincorp.cn" value="manincorp.cn" />
+            </div>
+            <div class="col">
+              <label for="titleKeywords">标题关键词 titleKeywords（<code>|</code> 分隔）</label>
+              <input type="text" id="titleKeywords" name="titleKeywords" placeholder="万年移民" value="万年移民" />
+            </div>
+            <div class="col">
+              <label for="browseAnchor">目标页面锚点 browseAnchor（站内浏览寻找的页，默认：关于我们）</label>
+              <input type="text" id="browseAnchor" name="browseAnchor" placeholder="关于我们" value="关于我们" />
+            </div>
+          </div>
+          <small class="hint">双匹配规则：结果标题含任一标题关键词，且真实地址含目标域名，取前 10 条首个命中。browseAnchor 用于站内浏览时寻找「关于/联系」类页面，可按站点实际文案填写（如「关于万年」）。</small>
+        </fieldset>
+
+        <!-- 拟人参数 -->
+        <fieldset class="field">
+          <legend>拟人动作设置（可选）</legend>
+          <div class="grid">
+            <div class="col">
+              <label for="staySeconds">目标页停留(秒)</label>
+              <input type="number" id="staySeconds" name="staySeconds" value="15" min="1" />
+            </div>
+            <div class="col">
+              <label for="scrollUp">上滑次数</label>
+              <input type="number" id="scrollUp" name="scrollUp" value="3" min="0" />
+            </div>
+            <div class="col">
+              <label for="scrollDown">下滑次数</label>
+              <input type="number" id="scrollDown" name="scrollDown" value="3" min="0" />
+            </div>
+            <div class="col">
+              <label for="ampMin">幅度下限(px)</label>
+              <input type="number" id="ampMin" name="ampMin" value="300" min="0" />
+            </div>
+            <div class="col">
+              <label for="ampMax">幅度上限(px)</label>
+              <input type="number" id="ampMax" name="ampMax" value="800" min="0" />
+            </div>
+            <div class="col">
+              <label for="intervalMin">间隔下限(秒)</label>
+              <input type="number" id="intervalMin" name="intervalMin" value="1" min="0" step="0.1" />
+            </div>
+            <div class="col">
+              <label for="intervalMax">间隔上限(秒)</label>
+              <input type="number" id="intervalMax" name="intervalMax" value="2" min="0" step="0.1" />
+            </div>
+            <!-- 多平台模式：谷歌关闭后无意义（唯一选项为 百度→谷歌），本地仅百度故隐藏 -->
+            <div class="col" style="display:none">
+              <label for="mode">多平台模式</label>
+              <select id="mode" name="mode">
+                <option value="serial" selected>串行（百度→谷歌）</option>
+                <option value="concurrent">并发（预留）</option>
+              </select>
+            </div>
+          </div>
+        </fieldset>
+
+        <!-- 令牌（决策 A3） -->
+        <div class="field">
+          <label for="token">访问令牌（token）</label>
+          <input type="text" id="token" name="token" placeholder="默认 autoclaw-dev（部署侧可改）" />
+          <small class="hint">用于访问受保护的后端接口，提交后本地保存。</small>
+        </div>
+
+        <!-- 历史配置（F-24：从历史回填表单） -->
+        <fieldset class="field history">
+          <legend>历史配置（可选）</legend>
+          <div class="row">
+            <div class="col">
+              <label for="history-select">从历史配置回填</label>
+              <select id="history-select" name="history-select">
+                <option value="">— 加载历史配置 —</option>
+              </select>
+            </div>
+          </div>
+          <small class="hint">选择一个历史提交，自动回填表单字段，便于复用与重新运行。</small>
+        </fieldset>
+
+        <!-- 客户归属（P0-9） -->
+        <fieldset class="field">
+          <legend>客户归属（可选）</legend>
+          <div class="row">
+            <div class="col">
+              <label for="clientId">归属客户</label>
+              <select id="clientId" name="clientId">
+                <option value="">— 不关联客户 —</option>
+              </select>
+            </div>
+          </div>
+          <small class="hint">任务可归属到客户，用于按客户生成交付报告（下方「客户管理」可新增）。</small>
+        </fieldset>
+
+        <div class="actions">
+          <button type="submit" id="submit-btn">提交并启动任务</button>
+        </div>
+        <p id="form-error" class="error-text" hidden></p>
+      </form>
+
+      <!-- 客户管理（P0-8：CRUD） -->
+      <section class="card client-admin" id="client-admin">
+        <h2>客户管理</h2>
+        <div class="client-list" id="client-list">
+          <p class="hint">加载中…</p>
+        </div>
+
+        <form id="client-form" class="client-form">
+          <h3>新增客户</h3>
+          <div class="row">
+            <div class="col">
+              <label for="client-name">客户名称 *</label>
+              <input type="text" id="client-name" name="client-name" placeholder="如：万年移民工作室" required />
+            </div>
+            <div class="col">
+              <label for="client-contact">联系人</label>
+              <input type="text" id="client-contact" name="client-contact" placeholder="选填" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="col">
+              <label for="client-notes">备注</label>
+              <input type="text" id="client-notes" name="client-notes" placeholder="选填" />
+            </div>
+          </div>
+          <div class="actions">
+            <button type="submit" id="client-add-btn">新增客户</button>
+          </div>
+          <p id="client-form-error" class="error-text" hidden></p>
+        </form>
+      </section>
+    </main>
+
+    <script src="/js/config.js"></script>
+  </body>
+</html>

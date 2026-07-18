@@ -1,0 +1,68 @@
+sequenceDiagram
+  autonumber
+  participant E as TaskEngine(worker)
+  participant S as BrowserSession
+  participant A as BaiduAdapter
+  participant X as StepExecutor
+  participant M as TaskManager(主进程)
+  participant D as db(task_run_log)
+
+  Note over E,S: 步骤① 创建浏览器会话 + 健康检查
+  E->>X: runStep({stepName:'boot', fn: launch+healthCheck})
+  X->>S: launch(proxy) / newContext()
+  S-->>X: context
+  X->>S: healthCheck(ctx) newPage+evaluate
+  alt 健康检查失败 / 启动异常
+    S-->>X: throw ERR_BROWSER_LAUNCH
+    X-->>M: emit STEP(boot, failed, error_code=ERR_BROWSER_LAUNCH)
+    M->>D: bufferRunLog 然后 flush 落库(带 taskId)
+    X-->>E: StepState(failed) 后 run() 直接返回 FAILED
+  else 成功
+    X-->>M: emit STEP(boot, success)
+    M->>D: bufferRunLog 落库
+  end
+
+  loop 每个 round（platform 乘 keyword）
+    Note over E,A: 步骤② 导航
+    E->>X: runStep({stepName:'open', fn: A.open(page)})
+    X->>A: open(page)
+    A-->>X: ok 或 throw
+    X-->>M: emit STEP(open, status) 后 D 落库
+
+    Note over E,A: 步骤③ 输入并提交
+    E->>X: runStep({stepName:'fill', fn: A.fillAndSubmit(page,kw)})
+    X->>A: fillAndSubmit(page, kw)
+    A-->>X: submitted
+    X-->>M: emit STEP(fill, status) 后 D 落库
+
+    Note over E,A: 步骤④ 等待并解析（含验证码轮询）
+    E->>X: runStep({stepName:'wait', fn: A.waitResults(page)})
+    X->>A: waitResults(page)
+    alt 命中验证码
+      A-->>X: 提示人工过码，继续轮询
+    else 超上限
+      A-->>X: throw ERR_BAIDU_CAPTCHA
+    end
+    A-->>X: {hasResults, captchaDetected}
+    X-->>M: emit STEP(wait, status) 后 D 落库
+
+    Note over E,A: 步骤⑤ 定位目标
+    E->>X: runStep({stepName:'locate', fn: A.locateTarget(page,target)})
+    X->>A: locateTarget(page, target)
+    A-->>X: href 或 null 或 throw(ERR_BAIDU_CAPTCHA)
+    X-->>M: emit STEP(locate, status) 后 D 落库
+
+    Note over E,A: 步骤⑥ 进入(关键)+停留/滚动(软)
+    E->>X: runStep({stepName:'enter', fn: A.clickTarget(page,href)})
+    X-->>M: emit STEP(enter, status) 后 D 落库
+    E->>X: runSoftStep({stepName:'stay', fn: A.stayDwell(page)})
+    X-->>M: emit STEP(stay, status) 后 D 落库(失败不阻断)
+    E->>X: runSoftStep({stepName:'browse', fn: A.inSiteBrowse(page)})
+    X-->>M: emit STEP(browse, status) 后 D 落库(失败仅记 soft)
+
+    Note over E,M: 步骤⑦ 横切：每步已落库，本轮结束汇总
+    E->>M: emit ROUND_END(stats)
+    E->>E: 失败率 大于 阈值 则 熔断 FAILED
+  end
+
+  Note over M,D: worker 退出前 await flushRunLog()，确保 pending 全落库（修复 H-4）

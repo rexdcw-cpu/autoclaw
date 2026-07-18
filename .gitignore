@@ -1,0 +1,27 @@
+# 依赖
+node_modules/
+
+# 运行日志（任务日志落盘目录，内容不入库）
+logs/*.log
+logs/*.log.*
+
+# 本地数据/模板缓存
+data/*.json
+
+# 运行时 SQLite 库（含任务日志，不入库）
+data/*.db
+data/*.db-*
+
+# 浏览器持久化 profile 缓存
+data/chrome-profile/
+
+# 环境变量
+.env
+.env.local
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 工具内部记忆/状态（非项目源码）
+.workbuddy/
