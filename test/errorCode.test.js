@@ -62,7 +62,7 @@ test('flattenEvent reads error_code from step.code (success path: error null, co
   };
   const row = db.flattenEvent(ev);
   assert.strictEqual(row.length, 12, '应包含 12 列（含 error_code）');
-  // error 列仅在 step 失败 / round.error / ev.message 时填充；成功步为空
+  // error 列仅在 step 失败 / round.error / ev.error（显式错误字段）时填充；成功步为空
   assert.strictEqual(row[IDX_ERROR], null, '成功步 error 列为 null');
   assert.strictEqual(row[IDX_TIMESTAMP], '2026-07-16 10:00:00', 'timestamp 列索引不变（10）');
   assert.strictEqual(row[IDX_ERROR_CODE], null, '无 code 时 error_code 为 null');
@@ -102,4 +102,34 @@ test('flattenEvent captures error_code = ERR_BROWSER_LAUNCH for a boot failure',
   };
   const row = db.flattenEvent(ev);
   assert.strictEqual(row[IDX_ERROR_CODE], ERR.ERR_BROWSER_LAUNCH);
+});
+
+// ---------------------------------------------------------------------------
+// 4) error 列不得被普通成功事件的 message 污染（修复：task_end「任务结束」误填 error）
+// ---------------------------------------------------------------------------
+
+test('flattenEvent: a successful task_end keeps error column NULL despite its message', () => {
+  const ev = {
+    taskId: 't1',
+    type: 'task_end',
+    status: 'completed',
+    message: '任务结束',
+    timestamp: '2026-07-16T10:00:03.000Z',
+  };
+  const row = db.flattenEvent(ev);
+  assert.strictEqual(row[IDX_ERROR], null, '成功 task_end 的 error 列必须为 null（不能填 message）');
+  assert.strictEqual(row[8], '任务结束', 'message 列仍保留原文');
+});
+
+test('flattenEvent: a worker error event populates error column from explicit error field', () => {
+  const ev = {
+    taskId: 't1',
+    type: 'task_end',
+    status: 'failed',
+    error: 'worker 异常：ECONNREFUSED',
+    message: 'worker 异常：ECONNREFUSED',
+    timestamp: '2026-07-16T10:00:04.000Z',
+  };
+  const row = db.flattenEvent(ev);
+  assert.strictEqual(row[IDX_ERROR], 'worker 异常：ECONNREFUSED', 'worker 异常应写入 error 列');
 });

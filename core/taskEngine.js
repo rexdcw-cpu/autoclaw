@@ -144,9 +144,12 @@ class TaskEngine {
           break;
         }
 
-        // 拟人：除第一个 round 外，round 之间拉开 8–20s 随机停顿，降低连续搜索触发风控概率
+        // 拟人：除第一个 round 外，round 之间拉开随机停顿，降低连续搜索触发风控概率。
+        // 停顿区间支持 AUTOCLAW_INTER_ROUND_MIN / AUTOCLAW_INTER_ROUND_MAX 覆盖（默认 8–20s）。
         if (plan.roundIndex > 0) {
-          await sleep(randInt(8000, 20000));
+          const irMin = Number(process.env.AUTOCLAW_INTER_ROUND_MIN) || 8000;
+          const irMax = Number(process.env.AUTOCLAW_INTER_ROUND_MAX) || 20000;
+          await sleep(randInt(irMin, Math.max(irMin, irMax)));
         }
 
         await this.runRound(plan);

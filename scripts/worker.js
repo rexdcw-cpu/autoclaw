@@ -52,13 +52,15 @@ process.on('message', async (msg) => {
         }),
       );
     } catch (e) {
+      const errMsg = e && e.message ? e.message : String(e);
       send(
         'error',
         P.makeProgress({
           taskId: config && config.taskId,
           type: EventType.TASK_END,
           status: TaskStatus.FAILED,
-          message: 'worker 异常：' + (e && e.message ? e.message : String(e)),
+          error: errMsg,
+          message: 'worker 异常：' + errMsg,
         }),
       );
     }

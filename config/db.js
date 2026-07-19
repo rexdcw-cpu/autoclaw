@@ -406,8 +406,11 @@ function flattenEvent(ev) {
     error = step.detail || null;
   } else if (round && round.error) {
     error = round.error;
-  } else if (ev && ev.message) {
-    error = ev.message;
+  } else if (ev && ev.error) {
+    // 仅当事件显式携带 error 字段时才填入 error 列（如 worker 异常）。
+    // 注意：普通成功事件的 message（如「任务结束」）不得写入 error 列，
+    // 否则 WHERE error IS NOT NULL 会把成功任务误判为失败。
+    error = ev.error;
   }
 
   // T0 对齐：错误码优先从步骤对象的 .code 取（横切执行器 stepExecutor 在 T2 注入）；
