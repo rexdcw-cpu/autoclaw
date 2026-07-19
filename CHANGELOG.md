@@ -4,6 +4,27 @@
 
 ---
 
+## [0.3.2] — 2026-07-20
+
+**里程碑**：proxy 代理入口端到端打通 + 运行日志两项优化（基于实跑日志分析）。
+
+### 新增（Features）
+- **代理（proxy）端到端可用（F-18 入口落地）**
+  - `core/taskConfig.js` 新增 `sanitizeProxy`：兼容多种写法——字符串 URL（`'http://1.2.3.4:8080'`）、`{ server }`、`{ httpProxy }`、`{ proxy }`，统一归一化为 `{ httpProxy }`，并校验必须为 `http(s)://` 或 `socks(5)://`，非法格式抛 `ERR_INVALID_CONFIG`。空值（null/''/`{}`）视为不走代理。
+  - 前端 `index.html` 增加「代理地址（可选）」输入框；`public/js/config.js` 提交时收集 `proxy` 字段、历史回填时还原。
+  - 底层注入（`browserSession.launch` → Playwright `contextOptions.proxy = { server }`）此前已就绪，本次补齐归一化与前端入口后，从界面填代理即可真正走代理，实现多 IP 分散搜索风控。
+
+### 修复（Fixes）
+- **轮间停顿可调参**：`core/taskEngine.js` 的轮间 8–20s 随机停顿改为读 `AUTOCLAW_INTER_ROUND_MIN / AUTOCLAW_INTER_ROUND_MAX` 环境变量（默认不变），与项目其他拟人/策略参数风格一致。
+- **运行日志 error 列误填**：`config/db.js` 的 `flattenEvent` 原先会把普通成功事件的 `message`（如 task_end「任务结束」）写入 `error` 列，导致 `WHERE error IS NOT NULL` 误判成功任务为失败。改为仅在事件显式携带 `error` 字段时才填充；`scripts/worker.js` 的 worker 异常事件补充 `error` 字段，保证异常仍能进 error 列。
+
+### 测试
+- `test/errorCode.test.js` 新增 2 条断言（成功 task_end 的 error 列必须为 null；worker 异常事件 error 列正确填充）。
+- `test/taskConfig.test.js` 新增 7 条 proxy 归一化断言（字符串 / server / httpProxy / 空值 / 非法格式）。
+- 全套：`node --test test/*.test.js` = **222 用例 / 221 通过 / 1 skip**。
+
+---
+
 ## [0.3.1] — 2026-07-20
 
 **里程碑**：实测基线发布——将 v0.3.0 之后的「默认搜索关键词」修正固化为正式版本，并记录最近一次实跑验证（任务 `a78e2545...`，百度 3 轮，145s，0 报错）。

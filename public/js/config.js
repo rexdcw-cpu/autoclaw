@@ -100,6 +100,10 @@
     var mode = document.getElementById('mode').value;
     var clientId = document.getElementById('clientId').value.trim();
 
+    var proxyEl = document.getElementById('proxy-url');
+    var proxyVal = proxyEl ? proxyEl.value.trim() : '';
+    var proxy = proxyVal ? proxyVal : null;
+
     var payload = {
       platforms: platforms,
       keywords: keywords,
@@ -109,6 +113,7 @@
       anthropic: anthropic,
       humanize: humanize,
       strategy: { mode: mode },
+      proxy: proxy,
     };
     if (clientId) payload.clientId = clientId;
 
@@ -209,6 +214,9 @@
     if (item.runMode) { var m = document.getElementById('mode'); if (m) m.value = item.runMode; }
     var cb = document.getElementById('clientId');
     if (cb) cb.value = item.clientId || '';
+    var pe = document.getElementById('proxy-url');
+    var p = item.proxy;
+    if (pe) pe.value = (p && (p.httpProxy || p.server || p.proxy)) ? (p.httpProxy || p.server || p.proxy) : '';
   }
 
   if (historySel) {

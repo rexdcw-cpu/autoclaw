@@ -222,3 +222,44 @@ test('valid config carries anthropic + strategy defaults', () => {
   assert.strictEqual(typeof cfg.strategy.mode, 'string');
   assert.strictEqual(cfg.strategy.mode, 'serial');
 });
+
+// ---------------------------------------------------------------------------
+// Proxy normalization (F-18 入口落地)
+// ---------------------------------------------------------------------------
+
+test('proxy omitted -> config.proxy is null', () => {
+  const cfg = buildTaskConfig(validPayload());
+  assert.strictEqual(cfg.proxy, null);
+});
+
+test('proxy as string URL -> { httpProxy }', () => {
+  const cfg = buildTaskConfig(validPayload({ proxy: 'http://1.2.3.4:8080' }));
+  assert.deepStrictEqual(cfg.proxy, { httpProxy: 'http://1.2.3.4:8080' });
+});
+
+test('proxy as { server } -> normalized to { httpProxy }', () => {
+  const cfg = buildTaskConfig(validPayload({ proxy: { server: 'socks5://9.9.9.9:1080' } }));
+  assert.deepStrictEqual(cfg.proxy, { httpProxy: 'socks5://9.9.9.9:1080' });
+});
+
+test('proxy as { httpProxy } -> preserved as-is', () => {
+  const cfg = buildTaskConfig(validPayload({ proxy: { httpProxy: 'https://5.5.5.5:3128' } }));
+  assert.deepStrictEqual(cfg.proxy, { httpProxy: 'https://5.5.5.5:3128' });
+});
+
+test('proxy empty string -> null (no proxy)', () => {
+  const cfg = buildTaskConfig(validPayload({ proxy: '' }));
+  assert.strictEqual(cfg.proxy, null);
+});
+
+test('proxy with empty object -> null (no proxy)', () => {
+  const cfg = buildTaskConfig(validPayload({ proxy: {} }));
+  assert.strictEqual(cfg.proxy, null);
+});
+
+test('proxy without scheme -> ERR_INVALID_CONFIG', () => {
+  assert.throws(
+    () => buildTaskConfig(validPayload({ proxy: '1.2.3.4:8080' })),
+    (e) => e && e.code === ERR.ERR_INVALID_CONFIG
+  );
+});

@@ -113,6 +113,13 @@
           <small class="hint">每个关键步骤之间插入一次随机「思考停顿（最短~最长 + 随机抖动）+ 随机微动作（移动鼠标 / 滚动 / 悬停按键）」，让连续操作更不可预测。可在后端用 AUTOCLAW_HUMANIZE_* 环境变量统一覆盖。</small>
         </fieldset>
 
+        <!-- 代理（F-18 入口落地） -->
+        <div class="field">
+          <label for="proxy-url">代理地址（可选）</label>
+          <input type="text" id="proxy-url" name="proxy-url" placeholder="http://1.2.3.4:8080 或 socks5://..." />
+          <small class="hint">为本次任务指定出口代理，降低同一 IP 反复搜索触发风控的概率。支持 http(s):// 或 socks(5):// 形式；留空则不走代理。</small>
+        </div>
+
         <!-- 令牌（决策 A3） -->
         <div class="field">
           <label for="token">访问令牌（token）</label>

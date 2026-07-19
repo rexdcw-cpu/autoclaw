@@ -126,8 +126,8 @@ function buildTaskConfig(payload) {
     strategy.mode = 'serial'; // V1 仅支持串行，concurrent 预留
   }
 
-  // --- 代理 / Cookie（F-18：V1 不实现，仅保留入口）---
-  const proxy = payload.proxy || null;
+  // --- 代理（F-18 入口落地）：归一化为 { httpProxy } 并校验 ---
+  const proxy = sanitizeProxy(payload.proxy);
 
   // --- 客户归属（P0-9）：可选，缺省不关联 ---
   const clientId = payload.clientId || payload.client_id || null;
@@ -187,6 +187,41 @@ function sanitizeStrategy(raw) {
     if (Number.isFinite(v) && raw[k] !== '' && raw[k] != null) out[k] = v;
   }
   return out;
+}
+
+/**
+ * 归一化代理配置为统一的 { httpProxy } 形状（供 browserSession.launch 注入）。
+ * 兼容多种前端/API 输入写法：
+ *   - 字符串 URL：'http://1.2.3.4:8080' → { httpProxy: 'http://1.2.3.4:8080' }
+ *   - { httpProxy: '...' }            → 原样保留
+ *   - { server: '...' }               → { httpProxy: '...' }（更常见的写法）
+ *   - { proxy: '...' }                → { httpProxy: '...' }
+ * 校验：必须是 http(s):// 或 socks(5):// 形式，否则抛 ERR_INVALID_CONFIG。
+ * 空值（null/undefined/''/{}）返回 null，表示不走代理。
+ * @param {string|object|null} raw
+ * @returns {{httpProxy:string}|null}
+ */
+function sanitizeProxy(raw) {
+  if (raw == null || raw === '') return null;
+
+  let url = null;
+  if (typeof raw === 'string') {
+    url = raw.trim();
+  } else if (typeof raw === 'object') {
+    url = (raw.httpProxy || raw.server || raw.proxy || '').toString().trim();
+    // 兼容 { httpProxy: '' } / { server: '' } 等空对象写法 → 视为不配置
+    if (!url) return null;
+  } else {
+    return null;
+  }
+
+  if (!/^https?:\/\/.+/i.test(url) && !/^socks(5)?:\/\/.+/i.test(url)) {
+    throw configError(
+      'proxy 格式非法，需为 http(s):// 或 socks:// 开头的代理地址',
+      ERR.ERR_INVALID_CONFIG,
+    );
+  }
+  return { httpProxy: url };
 }
 
 module.exports = {
