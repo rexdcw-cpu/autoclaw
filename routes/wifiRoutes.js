@@ -38,6 +38,16 @@ router.get('/list', async (req, res) => {
   }
 });
 
+// GET /api/wifi/info —— 当前连接的 SSID / 本地出口 IP / 公网 IP 与归属地
+router.get('/info', async (req, res) => {
+  try {
+    const info = await wifi.getCurrentInfo();
+    return res.json({ code: 0, data: info, message: 'ok' });
+  } catch (e) {
+    return fail(res, 500, 'ERR_WIFI_INFO', '获取连接信息失败：' + (e.message || e));
+  }
+});
+
 // POST /api/wifi/connect
 router.post('/connect', async (req, res) => {
   const body = req.body || {};

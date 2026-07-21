@@ -132,3 +132,31 @@ test('buildProfileXml: 对 SSID/密码做 XML 转义', () => {
   assert.ok(xml.includes('<name>A&amp;B&lt;C</name>'));
   assert.ok(xml.includes('<keyMaterial>p&amp;w&quot;x</keyMaterial>'));
 });
+
+test('parseLocalIp: 取活跃出口 IP（WLAN 被桥接场景）', () => {
+  // 网桥 metric 25 < 以太网 metric 35 → 应返回网桥的 192.168.1.187
+  const out = [
+    'Configuration for interface "网桥"',
+    '    IP Address: 192.168.1.187',
+    '    Default Gateway: 192.168.1.1',
+    '    InterfaceMetric: 25',
+    'Configuration for interface "以太网"',
+    '    IP Address: 192.168.88.254',
+    '    Default Gateway: 192.168.88.1',
+    '    InterfaceMetric: 35',
+    'Configuration for interface "Loopback Pseudo-Interface 1"',
+    '    IP Address: 127.0.0.1',
+  ].join('\n');
+  assert.strictEqual(wifi.parseLocalIp(out), '192.168.1.187');
+});
+
+test('parseLocalIp: 无默认网关时返回空串', () => {
+  const out = [
+    'Configuration for interface "蓝牙网络连接"',
+    '    DHCP enabled: Yes',
+    'Configuration for interface "Loopback Pseudo-Interface 1"',
+    '    IP Address: 127.0.0.1',
+  ].join('\n');
+  assert.strictEqual(wifi.parseLocalIp(out), '');
+});
+

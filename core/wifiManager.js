@@ -20,6 +20,7 @@
  */
 
 const { exec } = require('child_process');
+const https = require('https');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -291,6 +292,7 @@ async function connect(ssid, password) {
 
 module.exports = {
   runNetsh,
+  runNetshRaw,
   getInterface,
   getCurrentSsid,
   parseNetworks,
@@ -298,4 +300,149 @@ module.exports = {
   buildProfileXml,
   listNetworks,
   connect,
+  getLocalIp,
+  getPublicGeo,
+  getCurrentInfo,
+  parseLocalIp,
 };
+
+/**
+ * 通用 netsh 调用（不限定 wlan 子命令），用于取本地 IP 等。
+ * @param {string} args 如 'interface ipv4 show addresses'
+ * @returns {Promise<string>}
+ */
+function runNetshRaw(args) {
+  return new Promise((resolve) => {
+    const cmd = 'chcp 65001 >nul && netsh ' + args;
+    exec(
+      cmd,
+      { encoding: 'utf8', maxBuffer: 1024 * 1024 },
+      (err, stdout, stderr) => {
+        resolve((stdout || '') + (stderr || ''));
+      },
+    );
+  });
+}
+
+/**
+ * 从 `netsh interface ipv4 show addresses` 输出里取「当前出口」的本地 IPv4。
+ * 规则：挑「有默认网关」且 InterfaceMetric 最小的接口（即当前活跃出口），
+ * 兼容 WLAN 被桥接的场景（IP 落在网桥上）。
+ * @param {string} out
+ * @returns {string} 如 '192.168.1.187'，无则 ''
+ */
+function parseLocalIp(out) {
+  const blocks = String(out || '').split(/Configuration for interface\s+/);
+  let best = null;
+  for (let i = 1; i < blocks.length; i++) {
+    const b = blocks[i];
+    const ipm = b.match(/IP Address:\s*([\d.]+)/);
+    const gw = b.match(/Default Gateway:\s*([\d.]+)/);
+    if (!ipm || !gw) continue; // 无 IP 或无默认网关（Loopback / 未连接）
+    const metricM = b.match(/InterfaceMetric:\s*(\d+)/);
+    const metric = metricM ? parseInt(metricM[1], 10) : 9999;
+    if (!best || metric < best.metric) best = { ip: ipm[1], metric: metric };
+  }
+  return best ? best.ip : '';
+}
+
+/** 取当前出口本地 IPv4（失败返回 ''）。 */
+async function getLocalIp() {
+  try {
+    const out = await runNetshRaw('interface ipv4 show addresses');
+    return parseLocalIp(out);
+  } catch (e) {
+    return '';
+  }
+}
+
+/** 极简 HTTPS GET JSON，带超时与单次结算，永不抛异常。 */
+function httpGetJson(urlStr, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => {
+      if (!done) {
+        done = true;
+        resolve(v);
+      }
+    };
+    let req;
+    try {
+      const u = new URL(urlStr);
+      req = https.get(
+        u,
+        {
+          timeout: timeoutMs || 5000,
+          headers: { 'User-Agent': 'autoclaw/1.0', Accept: 'application/json' },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (c) => (data += c));
+          res.on('end', () => {
+            try {
+              finish({ ok: true, status: res.statusCode, body: JSON.parse(data) });
+            } catch (e) {
+              finish({ ok: false, error: '响应非 JSON：' + e.message });
+            }
+          });
+        },
+      );
+      req.on('timeout', () => {
+        try {
+          req.destroy();
+        } catch (e) {
+          /* ignore */
+        }
+        finish({ ok: false, error: '请求超时' });
+      });
+      req.on('error', (e) => finish({ ok: false, error: e.message }));
+    } catch (e) {
+      finish({ ok: false, error: e.message });
+    }
+  });
+}
+
+/**
+ * 查公网 IP 归属地（城市/地区/国家/运营商）。
+ * 默认调用 https://ipapi.co/json/，可用环境变量 AUTOCLAW_GEO_API 覆盖为其他服务。
+ * 兼容常见字段：region/regionName/province、country_name/country、city、org/asn。
+ * @returns {Promise<{ok:boolean, ip?:string, region?:string, country?:string, city?:string, org?:string, error?:string}>}
+ */
+async function getPublicGeo() {
+  const api = process.env.AUTOCLAW_GEO_API || 'https://ipapi.co/json/';
+  const r = await httpGetJson(api, 5000);
+  if (!r.ok || !r.body) {
+    return { ok: false, error: r.error || '未知错误' };
+  }
+  const b = r.body || {};
+  return {
+    ok: true,
+    ip: b.ip || '',
+    region: b.region || b.regionName || b.province || '',
+    country: b.country_name || b.country || '',
+    city: b.city || '',
+    org: b.org || b.asn || '',
+  };
+}
+
+/**
+ * 聚合「当前连接」的全部信息：SSID、本地出口 IP、公网 IP 与归属地。
+ * 即使未连接 WiFi，也会尽力返回本地/公网 IP（机器仍在线上）。
+ */
+async function getCurrentInfo() {
+  const iface = await getInterface();
+  const ssid = await getCurrentSsid(iface);
+  const localIp = await getLocalIp();
+  const geo = await getPublicGeo();
+  return {
+    ssid: ssid,
+    interface: iface,
+    localIp: localIp,
+    publicIp: geo.ok ? geo.ip : '',
+    region: geo.ok ? geo.region : '',
+    country: geo.ok ? geo.country : '',
+    city: geo.ok ? geo.city : '',
+    org: geo.ok ? geo.org : '',
+    geoError: geo.ok ? '' : geo.error || '获取失败',
+  };
+}

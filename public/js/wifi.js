@@ -15,6 +15,7 @@
   var currentEl = document.getElementById('wifi-current');
   var msgEl = document.getElementById('wifi-msg');
   var refreshBtn = document.getElementById('wifi-refresh');
+  var currentSsid = '';
 
   function token() {
     return localStorage.getItem(TOKEN_KEY) || 'autoclaw-dev';
@@ -86,13 +87,12 @@
           return;
         }
         if (msgEl) msgEl.hidden = true; // 成功则清掉上次的错误提示
-        if (d.data.current) {
-          currentEl.textContent =
-            '当前连接：' + d.data.current + '（接口 ' + d.data.interface + '）';
-        } else {
-          currentEl.textContent = '当前未连接（接口 ' + d.data.interface + '）';
-        }
+        currentSsid = d.data.current || '';
+        currentEl.textContent = currentSsid
+          ? '当前连接：' + currentSsid + '（接口 ' + d.data.interface + '）'
+          : '当前未连接（接口 ' + d.data.interface + '）';
         renderList(d.data.list || []);
+        loadCurrentInfo(); // 异步补充 本地IP / 公网IP / 地区
       })
       .catch(function (e) {
         renderList([]);
@@ -103,21 +103,60 @@
       });
   }
 
+  // 是否为「优先置顶」网络：当前已连接，或曾连接成功并记住了密码
+  function isPinned(n) {
+    return n.ssid === currentSsid || !!getPw(n.ssid);
+  }
+
+  // 异步获取当前连接的 IP 与归属地，更新到 currentEl
+  function loadCurrentInfo() {
+    fetch('/api/wifi/info', { headers: tokenHeaders() })
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (d) {
+        if (!d || d.code !== 0 || !d.data) return;
+        var i = d.data;
+        var parts = [];
+        parts.push(i.ssid ? '当前连接：' + i.ssid : '当前未连接');
+        if (i.localIp) parts.push('本地IP：' + i.localIp);
+        if (i.publicIp) parts.push('公网IP：' + i.publicIp);
+        var region = [i.city, i.region, i.country].filter(Boolean).join('/');
+        if (region) parts.push('地区：' + region + (i.org ? '（' + i.org + '）' : ''));
+        else if (i.geoError) parts.push('地区：获取失败（' + i.geoError + '）');
+        currentEl.textContent = parts.join(' ｜ ');
+      })
+      .catch(function () {
+        /* 不影响列表，保留基础连接信息 */
+      });
+  }
+
   function renderList(list) {
     if (!listEl) return;
     if (!list || list.length === 0) {
       listEl.innerHTML = '<p class="hint">未发现可见 WiFi（请确认无线已开启）。</p>';
       return;
     }
+    // 已连接 / 已存密码的网络置顶，组内按信号降序
+    list = list.slice().sort(function (a, b) {
+      var pa = isPinned(a) ? 1 : 0;
+      var pb = isPinned(b) ? 1 : 0;
+      if (pa !== pb) return pb - pa;
+      return (b.signal || 0) - (a.signal || 0);
+    });
     listEl.innerHTML = '';
     list.forEach(function (n) {
       var row = document.createElement('div');
-      row.className = 'wifi-row';
+      row.className = 'wifi-row' + (n.ssid === currentSsid ? ' wifi-row-current' : '');
 
       var info = document.createElement('div');
       info.className = 'wifi-info';
       var lock = n.secured ? '🔒' : '🔓';
+      var badge = '';
+      if (n.ssid === currentSsid) badge = '<span class="wifi-badge cur">● 当前</span> ';
+      else if (getPw(n.ssid)) badge = '<span class="wifi-badge saved">🔑 已存</span> ';
       info.innerHTML =
+        badge +
         '<strong>' +
         escapeHtml(n.ssid) +
         '</strong> ' +
