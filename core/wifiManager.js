@@ -356,8 +356,11 @@ async function getLocalIp() {
   }
 }
 
-/** 极简 HTTPS GET JSON，带超时与单次结算，永不抛异常。 */
-function httpGetJson(urlStr, timeoutMs) {
+/**
+ * 极简 HTTPS GET 文本，带超时与单次结算，永不抛异常。
+ * 返回 { ok, status, text, error }。
+ */
+function httpGetText(urlStr, timeoutMs) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (v) => {
@@ -372,18 +375,14 @@ function httpGetJson(urlStr, timeoutMs) {
       req = https.get(
         u,
         {
-          timeout: timeoutMs || 5000,
-          headers: { 'User-Agent': 'autoclaw/1.0', Accept: 'application/json' },
+          timeout: timeoutMs || 6000,
+          headers: { 'User-Agent': 'autoclaw/1.0', Accept: 'application/json, text/plain' },
         },
         (res) => {
           let data = '';
           res.on('data', (c) => (data += c));
           res.on('end', () => {
-            try {
-              finish({ ok: true, status: res.statusCode, body: JSON.parse(data) });
-            } catch (e) {
-              finish({ ok: false, error: '响应非 JSON：' + e.message });
-            }
+            finish({ ok: true, status: res.statusCode, text: data });
           });
         },
       );
@@ -393,36 +392,107 @@ function httpGetJson(urlStr, timeoutMs) {
         } catch (e) {
           /* ignore */
         }
-        finish({ ok: false, error: '请求超时' });
+        finish({ ok: false, status: 0, text: '', error: '请求超时' });
       });
-      req.on('error', (e) => finish({ ok: false, error: e.message }));
+      req.on('error', (e) => finish({ ok: false, status: 0, text: '', error: e.message }));
     } catch (e) {
-      finish({ ok: false, error: e.message });
+      finish({ ok: false, status: 0, text: '', error: e.message });
     }
   });
 }
 
 /**
- * 查公网 IP 归属地（城市/地区/国家/运营商）。
- * 默认调用 https://ipapi.co/json/，可用环境变量 AUTOCLAW_GEO_API 覆盖为其他服务。
- * 兼容常见字段：region/regionName/province、country_name/country、city、org/asn。
- * @returns {Promise<{ok:boolean, ip?:string, region?:string, country?:string, city?:string, org?:string, error?:string}>}
+ * 公网 IP / 归属地服务商列表（按顺序尝试，直到取到有效 IP）。
+ * 默认首选 myip.ipip.net（中文文本，国内可达性好，如「中国 广东 肇庆 联通」）；
+ * 备用 ipinfo.io（结构化 JSON，含城市/地区/国家/运营商，免 token）；
+ * 再备 ipapi.co（常被 Cloudflare 拦截）。
+ * 可用环境变量 AUTOCLAW_GEO_API 覆盖首选服务地址（不影响备用）。
+ */
+const GEO_PROVIDERS = [
+  {
+    name: 'myip.ipip.net',
+    url: () => process.env.AUTOCLAW_GEO_API || 'https://myip.ipip.net',
+    parse: (text) => {
+      const ipm = text.match(/IP[：:]\s*([0-9a-fA-F:.]+)/);
+      const cm = text.match(/来自于[：:]\s*(.+?)\s*$/m);
+      let region = '';
+      let country = '';
+      let city = '';
+      let org = '';
+      if (cm) {
+        const parts = cm[1].trim().split(/\s+/);
+        country = parts[0] || '';
+        region = parts[1] || '';
+        city = parts[2] || '';
+        org = parts.slice(3).join(' ') || '';
+      }
+      return { ip: ipm ? ipm[1] : '', region, country, city, org };
+    },
+  },
+  {
+    name: 'ipinfo.io',
+    url: () => 'https://ipinfo.io/json',
+    parse: (text) => {
+      const b = JSON.parse(text);
+      if (b.error) throw new Error(typeof b.error === 'string' ? b.error : 'ipinfo 返回错误');
+      return {
+        ip: b.ip || '',
+        region: b.region || b.regionName || '',
+        country: b.country || b.country_code || '',
+        city: b.city || '',
+        org: b.org || b.asn || '',
+      };
+    },
+  },
+  {
+    name: 'ipapi.co',
+    url: () => 'https://ipapi.co/json/',
+    parse: (text) => {
+      const b = JSON.parse(text);
+      if (b.error) throw new Error(typeof b.error === 'string' ? b.error : 'ipapi 返回错误');
+      return {
+        ip: b.ip || '',
+        region: b.region || b.regionName || b.province || '',
+        country: b.country_name || b.country || '',
+        city: b.city || '',
+        org: b.org || b.asn || '',
+      };
+    },
+  },
+];
+
+/**
+ * 查公网 IP 归属地（城市/地区/国家/运营商）。多服务商容错：
+ * 逐一尝试 GEO_PROVIDERS，跳过被拦截（返回 HTML）或解析失败或不含 IP 的服务。
+ * @returns {Promise<{ok:boolean, ip?:string, region?:string, country?:string, city?:string, org?:string, source?:string, error?:string}>}
  */
 async function getPublicGeo() {
-  const api = process.env.AUTOCLAW_GEO_API || 'https://ipapi.co/json/';
-  const r = await httpGetJson(api, 5000);
-  if (!r.ok || !r.body) {
-    return { ok: false, error: r.error || '未知错误' };
+  let lastErr = '所有服务均不可用';
+  for (const p of GEO_PROVIDERS) {
+    const r = await httpGetText(p.url(), 6000);
+    if (!r.ok) {
+      lastErr = p.name + '：' + (r.error || 'HTTP ' + r.status);
+      continue;
+    }
+    const text = (r.text || '').trim();
+    // 被 Cloudflare / 反爬拦截时返回 HTML 挑战页，直接跳过该服务
+    if (!text || /^<!DOCTYPE|<html[\s>]/i.test(text)) {
+      lastErr = p.name + '：返回了非数据页面（可能被拦截）';
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = p.parse(text);
+    } catch (e) {
+      lastErr = p.name + '：解析失败（' + e.message + '）';
+      continue;
+    }
+    if (parsed && parsed.ip) {
+      return Object.assign({ ok: true, source: p.name }, parsed);
+    }
+    lastErr = p.name + '：未返回有效 IP';
   }
-  const b = r.body || {};
-  return {
-    ok: true,
-    ip: b.ip || '',
-    region: b.region || b.regionName || b.province || '',
-    country: b.country_name || b.country || '',
-    city: b.city || '',
-    org: b.org || b.asn || '',
-  };
+  return { ok: false, error: lastErr };
 }
 
 /**

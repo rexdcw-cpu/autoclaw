@@ -119,11 +119,18 @@
         var i = d.data;
         var parts = [];
         parts.push(i.ssid ? '当前连接：' + i.ssid : '当前未连接');
-        if (i.localIp) parts.push('本地IP：' + i.localIp);
-        if (i.publicIp) parts.push('公网IP：' + i.publicIp);
-        var region = [i.city, i.region, i.country].filter(Boolean).join('/');
-        if (region) parts.push('地区：' + region + (i.org ? '（' + i.org + '）' : ''));
-        else if (i.geoError) parts.push('地区：获取失败（' + i.geoError + '）');
+        // 只显示外网 IP（内网 IP 不展示）
+        if (i.publicIp) {
+          parts.push('外网IP：' + i.publicIp);
+        } else {
+          parts.push('外网IP：获取失败' + (i.geoError ? '（' + i.geoError + '）' : ''));
+        }
+        var region = [i.country, i.region, i.city].filter(Boolean).join('/');
+        if (region) {
+          parts.push('地区：' + region + (i.org ? '（' + i.org + '）' : ''));
+        } else if (i.geoError) {
+          parts.push('地区：获取失败（' + i.geoError + '）');
+        }
         currentEl.textContent = parts.join(' ｜ ');
       })
       .catch(function () {

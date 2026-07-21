@@ -4,6 +4,24 @@
 
 ---
 
+## [0.3.7] — 2026-07-21
+
+**修复**：WiFi 当前连接「地区获取失败」+ 改为只显示外网 IP。
+
+### 修复（Fixes）
+- **公网 IP 归属地多服务商容错（根因：默认 ipapi.co 被 Cloudflare 拦截）**
+  - 现象：线上 7789 实例 `/api/wifi/info` 返回 `geoError: "响应非 JSON：Unexpected token '<'..."`——`ipapi.co/json/` 返回的是 Cloudflare「Just a moment…」挑战页 HTML，JSON 解析失败。
+  - `core/wifiManager.js` 的 `getPublicGeo` 重写为**多服务商容错链**：首选 `ipinfo.io`（结构化 JSON，免 token）→ 备用 `myip.ipip.net`（中文文本，国内可达性好）→ 再备 `ipapi.co`；逐一尝试，跳过「返回 HTML 挑战页 / 解析失败 / 不含 IP」的服务，取第一个有效 IP；全部失败时返回聚合错误（含每个服务的具体原因）。
+  - 新增 `httpGetText`（返回 `{ ok, status, text, error }`），替代原 `httpGetJson`；并检测被拦截返回的 `<!DOCTYPE` / `<html` 页面自动跳过，不再误判「成功但空」。
+  - 环境变量 `AUTOCLAW_GEO_API` 仍可覆盖首选（ipinfo.io）地址，不影响备用链。
+- **前端只显示外网 IP**：`public/js/wifi.js` 的 `loadCurrentInfo` 去掉「本地 IP」展示，改为只显示**外网 IP**（标签 `外网IP：`），地区保留 `country/region/city` 顺序（如 `中国/广东/肇庆`）；外网 IP 或地区获取失败时给出明确原因。
+
+### 验证
+- 沙箱直测：`ipapi.co` 返回 Cloudflare 页；`ipinfo.io`、`myip.ipip.net` 均正常返回公网 IP 与中文归属地。
+- 单元：`node --test test/*.test.js`（默认 mysql mock 路径）全绿。
+
+---
+
 ## [0.3.6] — 2026-07-21
 
 **优化**：WiFi 列表排序置顶 + 当前连接显示 IP 与归属地。
