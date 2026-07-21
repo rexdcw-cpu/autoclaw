@@ -90,7 +90,17 @@ app.get('/api/status', (req, res) => {
 });
 
 // 前端静态资源
-app.use(express.static(path.join(__dirname, 'public')));
+// 本地控制台工具：禁用静态资源缓存，避免浏览器用旧 JS 导致「刷新还是老问题」
+// （尤其 WiFi 面板——改了 wifi.js 后不硬刷新就一直跑旧逻辑）。
+app.use(
+  express.static(path.join(__dirname, 'public'), {
+    setHeaders: (res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    },
+  }),
+);
 
 // 友好的页面别名（UI 文案为 /task-config、/task-progress）
 app.get('/task-config', (req, res) => res.redirect('/'));

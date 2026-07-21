@@ -4,6 +4,14 @@
 
 ---
 
+## [0.3.10] — 2026-07-22
+- **fix(web): 静态资源禁用缓存，根治「刷新还是老问题」**
+  - 根因：`app.js` 用 `express.static` 提供前端文件且无 `Cache-Control` 头，`index.html` 里 `<script src="/js/wifi.js">` 也无版本号，浏览器缓存了旧 `wifi.js`，服务端虽已升到 v0.3.9，前端仍跑旧逻辑 → 表现为 WiFi 信息不更新。
+  - `express.static` 增加 `setHeaders`：对 `public/` 下所有文件下发 `no-cache, no-store, must-revalidate`（含 `Pragma`/`Expires`），每次刷新都拉最新 JS/CSS。
+  - 本地单用户工具性能无影响；今后改前端无需再依赖用户手动硬刷新。
+
+---
+
 ## [0.3.9] — 2026-07-21
 - **fix(wifi): 当前连接 IP 锁定 WLAN 网卡，切换 WiFi 后反映最新连接 IP**
   - 新增 `getWifiLocalIp(iface)`：优先取 WLAN 适配器自身 IP（未桥接），被桥接时取网桥 IP
