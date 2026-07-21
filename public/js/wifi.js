@@ -108,34 +108,64 @@
     return n.ssid === currentSsid || !!getPw(n.ssid);
   }
 
-  // 异步获取当前连接的 IP 与归属地，更新到 currentEl
-  function loadCurrentInfo() {
+  // 渲染「当前连接」信息行（外网 IP + 中文归属地）
+  function renderCurrentInfo(i, pending) {
+    if (!i || !currentEl) return;
+    var parts = [];
+    parts.push(i.ssid ? '当前连接：' + i.ssid : '当前未连接');
+    // 只显示外网 IP（内网 IP 不展示）
+    if (i.publicIp) {
+      parts.push('外网IP：' + i.publicIp);
+    } else if (pending) {
+      parts.push('外网IP：获取中…');
+    } else {
+      parts.push('外网IP：获取失败' + (i.geoError ? '（' + i.geoError + '）' : ''));
+    }
+    var region = [i.country, i.region, i.city].filter(Boolean).join('/');
+    if (region) {
+      parts.push('地区：' + region + (i.org ? '（' + i.org + '）' : ''));
+    } else if (pending) {
+      parts.push('地区：获取中…');
+    } else if (i.geoError) {
+      parts.push('地区：获取失败（' + i.geoError + '）');
+    }
+    currentEl.textContent = parts.join(' ｜ ');
+  }
+
+  // 异步获取当前连接的 IP 与归属地。
+  // 刚连上 WiFi 时外网往往还没通，单次请求拿不到公网 IP/地区就会「看不到信息」，
+  // 因此：若取不到则按退避重试（最多 INFO_MAX_RETRY 次），期间显示「获取中…」。
+  var INFO_MAX_RETRY = 6;
+  function fetchCurrentInfo(attempt) {
+    attempt = attempt || 0;
+    var pending = attempt < INFO_MAX_RETRY;
     fetch('/api/wifi/info', { headers: tokenHeaders() })
       .then(function (r) {
         return r.json();
       })
       .then(function (d) {
-        if (!d || d.code !== 0 || !d.data) return;
+        if (!d || d.code !== 0 || !d.data) {
+          if (pending) setTimeout(function () { fetchCurrentInfo(attempt + 1); }, 2500);
+          return;
+        }
         var i = d.data;
-        var parts = [];
-        parts.push(i.ssid ? '当前连接：' + i.ssid : '当前未连接');
-        // 只显示外网 IP（内网 IP 不展示）
         if (i.publicIp) {
-          parts.push('外网IP：' + i.publicIp);
+          renderCurrentInfo(i, false); // 成功，最终态
+        } else if (pending) {
+          renderCurrentInfo(i, true); // 外网还没通：显示获取中并继续重试
+          setTimeout(function () { fetchCurrentInfo(attempt + 1); }, 2500);
         } else {
-          parts.push('外网IP：获取失败' + (i.geoError ? '（' + i.geoError + '）' : ''));
+          renderCurrentInfo(i, false); // 重试耗尽：显示失败原因
         }
-        var region = [i.country, i.region, i.city].filter(Boolean).join('/');
-        if (region) {
-          parts.push('地区：' + region + (i.org ? '（' + i.org + '）' : ''));
-        } else if (i.geoError) {
-          parts.push('地区：获取失败（' + i.geoError + '）');
-        }
-        currentEl.textContent = parts.join(' ｜ ');
       })
       .catch(function () {
-        /* 不影响列表，保留基础连接信息 */
+        // 网络级错误：仍在重试窗口内则静默重试
+        if (pending) setTimeout(function () { fetchCurrentInfo(attempt + 1); }, 3000);
       });
+  }
+
+  function loadCurrentInfo() {
+    fetchCurrentInfo(0);
   }
 
   function renderList(list) {
