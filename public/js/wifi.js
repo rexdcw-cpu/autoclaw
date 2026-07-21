@@ -38,14 +38,29 @@
       .replace(/"/g, '&quot;');
   }
 
+  function setRefreshing(on) {
+    if (!refreshBtn) return;
+    refreshBtn.disabled = !!on;
+    refreshBtn.textContent = on ? '刷新中…' : '刷新 WiFi 列表';
+  }
+
   function loadList() {
+    setRefreshing(true);
     fetch('/api/wifi/list', { headers: tokenHeaders() })
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
+      .then(function (r) {
+        return r.json().then(function (data) {
+          return { status: r.status, data: data };
+        });
+      })
+      .then(function (r) {
+        var d = r.data;
         if (!d || d.code !== 0 || !d.data) {
+          // 后端返回错误：把原因显示出来，而不是静默留空
+          showMsg((d && d.message) || ('加载失败（HTTP ' + r.status + '）'), true);
           renderList([]);
           return;
         }
+        if (msgEl) msgEl.hidden = true; // 成功则清掉上次的错误提示
         if (d.data.current) {
           currentEl.textContent =
             '当前连接：' + d.data.current + '（接口 ' + d.data.interface + '）';
@@ -56,7 +71,10 @@
       })
       .catch(function (e) {
         renderList([]);
-        showMsg('加载失败：' + e.message, true);
+        showMsg('加载失败：' + e.message + '（请确认服务已用新版本重启）', true);
+      })
+      .finally(function () {
+        setRefreshing(false);
       });
   }
 

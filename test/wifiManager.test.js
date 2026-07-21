@@ -47,6 +47,10 @@ test('parseNetworks 解析中文 netsh 输出', () => {
   const free = nets.find((n) => n.ssid === 'FreeNet');
   assert.ok(free, '应能解析出 FreeNet');
   assert.strictEqual(free.auth, '开放式');
+  // 回归：BSSID 行里的 "SSID" 不得被误切成独立网络（旧实现会把
+  // "Network type : Infrastructure" 之类的行当 SSID）
+  const garbage = nets.filter((n) => /[:]/.test(n.ssid) || n.ssid.includes('Network type'));
+  assert.strictEqual(garbage.length, 0, '不应出现冒号/Network type 之类的垃圾 SSID');
 });
 
 test('parseNetworks 解析英文 netsh 输出', () => {

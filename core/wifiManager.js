@@ -80,31 +80,47 @@ async function getCurrentSsid(iface) {
 }
 
 /**
- * 解析 netsh 可见网络列表。
+ * 解析 netsh 可见网络列表（逐行、锚定行首，避免把 BSSID 误当 SSID 切分）。
  * @param {string} out `netsh wlan show networks mode=bssid` 的输出
  * @returns {Array<{ssid:string, auth:string, enc:string, signal:number}>}
  */
 function parseNetworks(out) {
-  const parts = out.split(/\n\s*SSID\s+\d+\s*:\s*/);
+  const lines = String(out || '').split(/\r?\n/);
   const nets = [];
-  for (let i = 1; i < parts.length; i++) {
-    const block = parts[i];
-    const name = block.split('\n', 1)[0].trim();
-    if (!name) continue; // 隐藏网络跳过
-    const am =
-      block.match(/身份验证\s*:\s*(.+)$/m) || block.match(/Authentication\s*:\s*(.+)$/m);
-    const em = block.match(/加密\s*:\s*(.+)$/m) || block.match(/Encryption\s*:\s*(.+)$/m);
-    const sigMatch =
-      block.match(/信号\s*:\s*(\d+)%/g) || block.match(/Signal\s*:\s*(\d+)%/g);
-    const auth = am ? am[1].trim() : '';
-    const enc = em ? em[1].trim() : '';
-    let signal = 0;
-    if (sigMatch) {
-      signal = sigMatch
-        .map((s) => parseInt(s.match(/(\d+)%/)[1], 10))
-        .reduce((a, b) => Math.max(a, b), 0);
+  let cur = null;
+  const ssidRe = /^\s*SSID\s+\d+\s*:\s*(.+?)\s*$/;
+  const authRe = /^\s*(?:身份验证|Authentication)\s*:\s*(.+?)\s*$/;
+  const encRe = /^\s*(?:加密|Encryption)\s*:\s*(.+?)\s*$/;
+  const sigRe = /^\s*(?:信号|Signal)\s*:\s*(\d+)%/;
+  for (const line of lines) {
+    const sm = line.match(ssidRe);
+    if (sm) {
+      const name = sm[1].trim();
+      if (!name) {
+        cur = null; // 隐藏网络：后续字段忽略，直到下一个有效 SSID
+        continue;
+      }
+      cur = { ssid: name, auth: '', enc: '', signal: 0 };
+      nets.push(cur);
+      continue;
     }
-    nets.push({ ssid: name, auth: auth, enc: enc, signal: signal });
+    if (!cur) continue;
+    const am = line.match(authRe);
+    if (am) {
+      cur.auth = am[1].trim();
+      continue;
+    }
+    const em = line.match(encRe);
+    if (em) {
+      cur.enc = em[1].trim();
+      continue;
+    }
+    const sg = line.match(sigRe);
+    if (sg) {
+      const v = parseInt(sg[1], 10);
+      if (v > cur.signal) cur.signal = v; // 多 BSSID 取最强信号
+      continue;
+    }
   }
   // 同名 SSID 去重（2.4G/5G 同名的多个 AP），保留信号最强
   const best = {};
