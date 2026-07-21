@@ -23,5 +23,8 @@ data/chrome-profile/
 .DS_Store
 Thumbs.db
 
+# Windows 保留名误生成（沙箱里 `>nul` 被当成文件重定向生成的 0 字节垃圾，删不掉）
+/nul
+
 # 工具内部记忆/状态（非项目源码）
 .workbuddy/
