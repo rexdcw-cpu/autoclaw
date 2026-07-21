@@ -1,0 +1,156 @@
+'use strict';
+
+/**
+ * public/js/wifi.js
+ * ---------------------------------------------------------------------------
+ * WiFi 切换面板逻辑（原生 JS，无构建）。
+ *   - 拉取 /api/wifi/list 渲染可见网络列表 + 当前连接。
+ *   - secured 网络显示密码输入框，点击「连接」调用 /api/wifi/connect。
+ *   - 复用 localStorage 中的访问令牌（与 config.js 共用键 autoclaw_token）。
+ */
+
+(function () {
+  var TOKEN_KEY = 'autoclaw_token';
+  var listEl = document.getElementById('wifi-list');
+  var currentEl = document.getElementById('wifi-current');
+  var msgEl = document.getElementById('wifi-msg');
+  var refreshBtn = document.getElementById('wifi-refresh');
+
+  function token() {
+    return localStorage.getItem(TOKEN_KEY) || 'autoclaw-dev';
+  }
+  function tokenHeaders(extra) {
+    var h = { 'Content-Type': 'application/json' };
+    h['x-autoclaw-token'] = token();
+    return Object.assign(h, extra || {});
+  }
+  function showMsg(msg, isError) {
+    if (!msgEl) return;
+    msgEl.textContent = msg;
+    msgEl.hidden = false;
+    msgEl.style.color = isError ? '' : '#1a7f37';
+  }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function loadList() {
+    fetch('/api/wifi/list', { headers: tokenHeaders() })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || d.code !== 0 || !d.data) {
+          renderList([]);
+          return;
+        }
+        if (d.data.current) {
+          currentEl.textContent =
+            '当前连接：' + d.data.current + '（接口 ' + d.data.interface + '）';
+        } else {
+          currentEl.textContent = '当前未连接（接口 ' + d.data.interface + '）';
+        }
+        renderList(d.data.list || []);
+      })
+      .catch(function (e) {
+        renderList([]);
+        showMsg('加载失败：' + e.message, true);
+      });
+  }
+
+  function renderList(list) {
+    if (!listEl) return;
+    if (!list || list.length === 0) {
+      listEl.innerHTML = '<p class="hint">未发现可见 WiFi（请确认无线已开启）。</p>';
+      return;
+    }
+    listEl.innerHTML = '';
+    list.forEach(function (n) {
+      var row = document.createElement('div');
+      row.className = 'wifi-row';
+
+      var info = document.createElement('div');
+      info.className = 'wifi-info';
+      var lock = n.secured ? '🔒' : '🔓';
+      info.innerHTML =
+        '<strong>' +
+        escapeHtml(n.ssid) +
+        '</strong> ' +
+        lock +
+        ' 信号 ' +
+        (n.signal || 0) +
+        '%  [' +
+        escapeHtml(n.auth) +
+        ']';
+
+      var acts = document.createElement('div');
+      acts.className = 'wifi-actions';
+
+      var pw = null;
+      if (n.secured) {
+        pw = document.createElement('input');
+        pw.type = 'password';
+        pw.placeholder = '密码';
+        pw.className = 'wifi-pw';
+        pw.autocomplete = 'off';
+        acts.appendChild(pw);
+      }
+
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'link-btn';
+      btn.textContent = '连接';
+      btn.addEventListener('click', function () {
+        var pwd = n.secured && pw ? pw.value : '';
+        connect(n.ssid, pwd, btn);
+      });
+      acts.appendChild(btn);
+
+      row.appendChild(info);
+      row.appendChild(acts);
+      listEl.appendChild(row);
+    });
+  }
+
+  function connect(ssid, password, btn) {
+    showMsg('', false);
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '连接中…';
+    }
+    fetch('/api/wifi/connect', {
+      method: 'POST',
+      headers: tokenHeaders(),
+      body: JSON.stringify({ ssid: ssid, password: password }),
+    })
+      .then(function (r) {
+        return r.json().then(function (data) {
+          return { status: r.status, data: data };
+        });
+      })
+      .then(function (r) {
+        if (r.data && r.data.code === 0) {
+          showMsg('✅ ' + (r.data.message || '已连接'), false);
+          loadList();
+        } else {
+          showMsg('⚠️ ' + ((r.data && r.data.message) || '连接失败'), true);
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = '连接';
+          }
+        }
+      })
+      .catch(function (e) {
+        showMsg('网络错误：' + e.message, true);
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = '连接';
+        }
+      });
+  }
+
+  if (refreshBtn) refreshBtn.addEventListener('click', loadList);
+  loadList();
+})();

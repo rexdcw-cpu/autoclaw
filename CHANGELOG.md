@@ -4,7 +4,21 @@
 
 ---
 
-## [0.3.2] — 2026-07-20
+## [0.3.3] — 2026-07-21
+
+**里程碑**：WiFi 切换功能（原独立脚本整合进控制台）。
+
+### 新增（Features）
+- **WiFi 切换面板**：在 autoclaw 控制台内新增「WiFi 切换」卡片，复用本机无线网卡。
+  - 后端 `core/wifiManager.js`：封装 `netsh wlan`，兼容中英文输出（`chcp 65001` 解决中文 SSID/标签乱码）；安全类型归一化（WPA2 个人→`WPA2PSK/AES`、WPA3→`WPA3SAE/AES`、WPA 个人→`WPAPSK`、开放→`open/none`，企业 802.1X 识别为不支持）；生成带 UTF-8 BOM 的 WLAN 配置 XML（对 SSID/密码做 XML 转义）；连接后轮询确认。
+  - 路由 `routes/wifiRoutes.js`：`GET /api/wifi/list`（列可见网络+当前连接，只读）、`POST /api/wifi/connect`（`{ ssid, password }` 切换，secured 网络需密码），均经 `taskTokenAuth` 保护，沿用 `code/data/message` 信封。
+  - 前端 `public/index.html` 新增卡片 + `public/js/wifi.js` 交互（拉列表 / 输密码 / 点击连接，复用 localStorage 令牌），`public/css/style.css` 补充 `.wifi-row` 样式。
+  - 设计定位：作为手动切换出口 IP 的辅助手段（与 proxy 互补），不做任务级自动切网/回切。
+
+### 测试（Tests）
+- 新增 `test/wifiManager.test.js`（11 条）：覆盖中英文 `parseNetworks`、同名 SSID 去重、`normalizeSecurity` 各类型映射、`buildProfileXml` 合法片段与 XML 转义。全套 **233 用例 / 232 通过 / 1 skip** 全绿。
+
+
 
 **里程碑**：proxy 代理入口端到端打通 + 运行日志两项优化（基于实跑日志分析）。
 

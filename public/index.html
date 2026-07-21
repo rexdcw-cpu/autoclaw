@@ -186,14 +186,32 @@
               <input type="text" id="client-notes" name="client-notes" placeholder="选填" />
             </div>
           </div>
-          <div class="actions">
-            <button type="submit" id="client-add-btn">新增客户</button>
-          </div>
-          <p id="client-form-error" class="error-text" hidden></p>
-        </form>
-      </section>
-    </main>
+        <div class="actions">
+          <button type="submit" id="client-add-btn">新增客户</button>
+        </div>
+        <p id="client-form-error" class="error-text" hidden></p>
+      </form>
+    </section>
+
+    <!-- WiFi 切换（检测可连 WiFi + 输密码切换） -->
+    <section class="card wifi-admin" id="wifi-admin">
+      <h2>WiFi 切换</h2>
+      <div class="row">
+        <div class="col" style="flex: 0 0 auto">
+          <button type="button" id="wifi-refresh">刷新 WiFi 列表</button>
+        </div>
+        <div class="col">
+          <span id="wifi-current" class="hint"></span>
+        </div>
+      </div>
+      <div class="wifi-list" id="wifi-list">
+        <p class="hint">加载中…</p>
+      </div>
+      <p id="wifi-msg" class="error-text" hidden></p>
+    </section>
+  </main>
 
     <script src="/js/config.js"></script>
+    <script src="/js/wifi.js"></script>
   </body>
 </html>

@@ -383,6 +383,37 @@ button.danger {
   color: var(--fail);
   border-color: var(--fail);
 }
+.wifi-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  flex-wrap: wrap;
+}
+.wifi-info {
+  font-size: 14px;
+}
+.wifi-info strong {
+  color: var(--text);
+}
+.wifi-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.wifi-pw {
+  width: 160px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+}
 .client-form .row {
   display: flex;
   gap: 14px;

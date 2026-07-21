@@ -20,6 +20,7 @@ const { Server } = require('socket.io');
 
 const taskRoutes = require('./routes/taskRoutes');
 const clientRoutes = require('./routes/clientRoutes');
+const wifiRoutes = require('./routes/wifiRoutes');
 const taskManager = require('./core/taskManager');
 
 const app = express();
@@ -68,6 +69,9 @@ app.use('/api/task', taskTokenAuth, taskRoutes);
 
 // /api/client/* 全部经鉴权中间件保护（V2 客户线）
 app.use('/api/client', taskTokenAuth, clientRoutes);
+
+// /api/wifi/* 全部经鉴权中间件保护（WiFi 检测与切换面板）
+app.use('/api/wifi', taskTokenAuth, wifiRoutes);
 
 // 健康检查（不鉴权，供 Nginx/监控探活）
 app.get('/api/status', (req, res) => {
