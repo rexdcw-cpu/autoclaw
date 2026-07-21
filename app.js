@@ -80,7 +80,7 @@ app.get('/api/status', (req, res) => {
     code: 0,
     data: {
       service: 'autoclaw',
-      version: '0.1.0',
+      version: require('./package.json').version,
       uptime: process.uptime(),
       activeTaskId: active.activeTaskId,
       status: active.status,
