@@ -301,6 +301,7 @@ module.exports = {
   listNetworks,
   connect,
   getLocalIp,
+  getWifiLocalIp,
   getPublicGeo,
   getCurrentInfo,
   parseLocalIp,
@@ -351,6 +352,40 @@ async function getLocalIp() {
   try {
     const out = await runNetshRaw('interface ipv4 show addresses');
     return parseLocalIp(out);
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * 取「当前 WiFi 网卡」的本地 IPv4 —— 即切换 WiFi 后应当更新的那个 IP。
+ * 与 getLocalIp（取机器默认出口 IP，可能来自网线/以太网）不同，这里明确锁定 WLAN 接口：
+ *   - 若 WLAN 适配器自身有 IP（未桥接），直接返回；
+ *   - 若 WLAN 被桥接（适配器无独立 IP，IP 落在网桥上），取该网桥的 IP。
+ * 这样切换 WiFi 后此值会随新连接变化，而不是恒为网线 IP。
+ * 兼容中英文 netsh 输出（「接口 "网桥" 的配置」/「IP 地址:」）。
+ * @param {string} iface WLAN 接口名（如 'WLAN'）
+ * @returns {Promise<string>}
+ */
+async function getWifiLocalIp(iface) {
+  try {
+    const ipRe = /(?:IP\s*地址|IP Address)\s*:\s*([\d.]+)/i;
+    // 1) WLAN 适配器自身 IP（未桥接场景）
+    const selfOut = await runNetshRaw('interface ipv4 show addresses "' + iface + '"');
+    const selfM = selfOut.match(ipRe);
+    if (selfM) return selfM[1];
+    // 2) 桥接场景：WLAN 无独立 IP，IP 在其所属网桥上。取网桥（bridge）接口的 IP。
+    const all = await runNetshRaw('interface ipv4 show addresses');
+    const blocks = all.split(/(?=接口\s+"|Configuration for interface)/);
+    for (const b of blocks) {
+      const nameM = b.match(/接口\s+"([^"]+)"\s*的配置|Configuration for interface\s+"?([^"\r\n]+)/);
+      const name = (nameM && (nameM[1] || nameM[2]) ? nameM[1] || nameM[2] : '').trim();
+      const ipM = b.match(ipRe);
+      if (ipM && /网桥|bridge/i.test(name)) {
+        return ipM[1];
+      }
+    }
+    return '';
   } catch (e) {
     return '';
   }
@@ -496,18 +531,20 @@ async function getPublicGeo() {
 }
 
 /**
- * 聚合「当前连接」的全部信息：SSID、本地出口 IP、公网 IP 与归属地。
+ * 聚合「当前连接」的全部信息：SSID、WiFi 连接 IP、公网 IP 与归属地。
  * 即使未连接 WiFi，也会尽力返回本地/公网 IP（机器仍在线上）。
+ * 注意：wifiIp 锁定 WLAN 网卡（切换 WiFi 后会变化），publicIp 为公网出口 IP。
  */
 async function getCurrentInfo() {
   const iface = await getInterface();
   const ssid = await getCurrentSsid(iface);
-  const localIp = await getLocalIp();
+  const wifiIp = await getWifiLocalIp(iface);
   const geo = await getPublicGeo();
   return {
     ssid: ssid,
     interface: iface,
-    localIp: localIp,
+    wifiIp: wifiIp,
+    localIp: wifiIp, // 兼容旧字段
     publicIp: geo.ok ? geo.ip : '',
     region: geo.ok ? geo.region : '',
     country: geo.ok ? geo.country : '',

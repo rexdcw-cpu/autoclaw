@@ -108,12 +108,20 @@
     return n.ssid === currentSsid || !!getPw(n.ssid);
   }
 
-  // 渲染「当前连接」信息行（外网 IP + 中文归属地）
+  // 渲染「当前连接」信息行：WiFi 连接 IP（随切换变化）+ 外网 IP + 中文归属地
   function renderCurrentInfo(i, pending) {
     if (!i || !currentEl) return;
     var parts = [];
     parts.push(i.ssid ? '当前连接：' + i.ssid : '当前未连接');
-    // 只显示外网 IP（内网 IP 不展示）
+    // WiFi 连接 IP：锁定 WLAN 网卡，切换 WiFi 后此值会变化（区别于机器默认出口/网线 IP）
+    if (i.wifiIp) {
+      parts.push('WiFi连接IP：' + i.wifiIp);
+    } else if (pending) {
+      parts.push('WiFi连接IP：获取中…');
+    } else {
+      parts.push('WiFi连接IP：未获取');
+    }
+    // 外网 IP（公网出口，刚连上可能稍后才通）
     if (i.publicIp) {
       parts.push('外网IP：' + i.publicIp);
     } else if (pending) {
@@ -149,13 +157,13 @@
           return;
         }
         var i = d.data;
-        if (i.publicIp) {
+        if (i.wifiIp && i.publicIp) {
           renderCurrentInfo(i, false); // 成功，最终态
         } else if (pending) {
-          renderCurrentInfo(i, true); // 外网还没通：显示获取中并继续重试
+          renderCurrentInfo(i, true); // 还没齐：显示获取中并继续重试
           setTimeout(function () { fetchCurrentInfo(attempt + 1); }, 2500);
         } else {
-          renderCurrentInfo(i, false); // 重试耗尽：显示失败原因
+          renderCurrentInfo(i, false); // 重试耗尽：显示已拿到的值 + 失败原因
         }
       })
       .catch(function () {

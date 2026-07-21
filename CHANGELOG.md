@@ -4,6 +4,13 @@
 
 ---
 
+## [0.3.9] — 2026-07-21
+- **fix(wifi): 当前连接 IP 锁定 WLAN 网卡，切换 WiFi 后反映最新连接 IP**
+  - 新增 `getWifiLocalIp(iface)`：优先取 WLAN 适配器自身 IP（未桥接），被桥接时取网桥 IP
+  - 修复旧 `getLocalIp`/`parseLocalIp` 中文 netsh 输出正则不匹配（"接口 "网桥" 的配置"/"IP 地址:"）导致始终返回空、且会取到默认出口（网线）IP 的问题
+  - `/api/wifi/info` 返回 `wifiIp` 字段（替代"机器默认出口 IP"）；前端显示「WiFi连接IP」+「外网IP」+ 地区
+  - 重试成功判定改为 wifiIp && publicIp 都拿到，切 WiFi 后 WiFi 连接 IP 立即正确、公网 IP 稍后补齐
+
 ## [0.3.8] — 2026-07-21
 
 **修复**：连上新 WiFi 后「当前连接」信息（外网 IP / 地区）不刷新。
