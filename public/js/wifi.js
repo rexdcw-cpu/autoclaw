@@ -38,6 +38,31 @@
       .replace(/"/g, '&quot;');
   }
 
+  // --- 密码记忆（按 SSID 存于 localStorage，明文存储，仅本地浏览器）---
+  // 注意：WiFi 密码以明文保存在浏览器 localStorage，方便「连接成功一次后不再重复输入」。
+  // 若介意明文落盘，可点行内「忘记」链接清除该 SSID 的保存密码。
+  var PW_KEY = 'autoclaw_wifi_pw_v1';
+  function loadPwMap() {
+    try {
+      return JSON.parse(localStorage.getItem(PW_KEY)) || {};
+    } catch (e) {
+      return {};
+    }
+  }
+  function getPw(ssid) {
+    return loadPwMap()[ssid] || '';
+  }
+  function savePw(ssid, pw) {
+    var m = loadPwMap();
+    if (pw) m[ssid] = pw;
+    else delete m[ssid];
+    try {
+      localStorage.setItem(PW_KEY, JSON.stringify(m));
+    } catch (e) {
+      /* 隐私模式 / 配额满则忽略，不影响连接 */
+    }
+  }
+
   function setRefreshing(on) {
     if (!refreshBtn) return;
     refreshBtn.disabled = !!on;
@@ -113,7 +138,20 @@
         pw.placeholder = '密码';
         pw.className = 'wifi-pw';
         pw.autocomplete = 'off';
+        pw.value = getPw(n.ssid); // 成功连过则预填，免去重复输入
         acts.appendChild(pw);
+        if (getPw(n.ssid)) {
+          var forget = document.createElement('button');
+          forget.type = 'button';
+          forget.className = 'link-btn small faint';
+          forget.textContent = '忘记';
+          forget.title = '清除该 WiFi 已保存的密码';
+          forget.addEventListener('click', function () {
+            savePw(n.ssid, '');
+            loadList();
+          });
+          acts.appendChild(forget);
+        }
       }
 
       var btn = document.createElement('button');
@@ -150,6 +188,7 @@
       })
       .then(function (r) {
         if (r.data && r.data.code === 0) {
+          if (password) savePw(ssid, password); // 连接成功：记住正确密码
           showMsg('✅ ' + (r.data.message || '已连接'), false);
           loadList();
         } else {

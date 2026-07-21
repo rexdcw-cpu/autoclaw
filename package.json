@@ -1,6 +1,6 @@
 {
   "name": "autoclaw",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "private": true,
   "description": "autoclaw · SEO 浏览器自动化控制台（Express + socket.io + Playwright + MySQL 持久化）",
   "main": "app.js",

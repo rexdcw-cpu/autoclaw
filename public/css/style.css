@@ -414,6 +414,20 @@ button.danger {
   color: var(--text);
   font-size: 13px;
 }
+.link-btn.small {
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.link-btn.faint {
+  color: var(--muted, #888);
+  border-color: var(--border);
+}
+.link-btn.faint:hover {
+  color: var(--fail, #c0392b);
+  border-color: var(--fail, #c0392b);
+  filter: none;
+}
 .client-form .row {
   display: flex;
   gap: 14px;
