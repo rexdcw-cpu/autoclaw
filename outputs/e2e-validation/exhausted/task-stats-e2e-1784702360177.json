@@ -1,0 +1,118 @@
+{
+  "taskId": "e2e-1784702360177",
+  "startedAt": "2026-07-22T06:39:20.177Z",
+  "pollWifi": true,
+  "keyword": "autoclaw-e2e 验证",
+  "clientId": null,
+  "perWifi": [
+    {
+      "ssid": "805",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "ROSNET2",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "ROSNET5",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "805_5G",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "ROSNET4",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "ROSNET3",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "ROSNET1",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "HUAWEI-805_5G",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "HUAWEI-805",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "ROSNET60",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "HUAWEI-5004_5G",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "CEREMON",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "ManinFTTR",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    },
+    {
+      "ssid": "HUAWEI-1CA2DK_5G",
+      "status": "failed",
+      "attempts": 4,
+      "retriesUsed": 3,
+      "error": "流程连续失败 4 次（含 3 次重试）"
+    }
+  ],
+  "summary": {
+    "totalWifi": 14,
+    "completedWifi": 0,
+    "failedWifi": 14,
+    "skippedWifi": 0,
+    "completionRate": 0,
+    "totalFlowAttempts": 56,
+    "totalRetries": 42,
+    "overall": "failed"
+  },
+  "savedAt": "2026-07-22T06:39:21.929Z"
+}

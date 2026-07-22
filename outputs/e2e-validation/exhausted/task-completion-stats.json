@@ -1,0 +1,20 @@
+[
+  {
+    "taskId": "e2e-1784702360177",
+    "startedAt": "2026-07-22T06:39:20.177Z",
+    "savedAt": "2026-07-22T06:39:21.929Z",
+    "pollWifi": true,
+    "keyword": "autoclaw-e2e 验证",
+    "clientId": null,
+    "summary": {
+      "totalWifi": 14,
+      "completedWifi": 0,
+      "failedWifi": 14,
+      "skippedWifi": 0,
+      "completionRate": 0,
+      "totalFlowAttempts": 56,
+      "totalRetries": 42,
+      "overall": "failed"
+    }
+  }
+]

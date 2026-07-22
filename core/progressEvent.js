@@ -28,6 +28,7 @@ const EventType = {
   STOPPED: 'stopped',
   ALERT: 'alert',
   WIFI_POLL: 'wifi_poll', // WIFI 轮询进度（切换/停留/第几轮）
+  TASK_STATS: 'task_stats', // 任务完成度统计与分析（v0.3.12）
 };
 
 /** 原子步骤名称（StepName） */

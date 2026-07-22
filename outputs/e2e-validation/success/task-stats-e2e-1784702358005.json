@@ -1,0 +1,118 @@
+{
+  "taskId": "e2e-1784702358005",
+  "startedAt": "2026-07-22T06:39:18.005Z",
+  "pollWifi": true,
+  "keyword": "autoclaw-e2e 验证",
+  "clientId": null,
+  "perWifi": [
+    {
+      "ssid": "805",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "ROSNET2",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "ROSNET5",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "805_5G",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "ROSNET4",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "ROSNET3",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "ROSNET1",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "HUAWEI-805_5G",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "HUAWEI-805",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "ROSNET60",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "HUAWEI-5004_5G",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "CEREMON",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "ManinFTTR",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    },
+    {
+      "ssid": "HUAWEI-1CA2DK_5G",
+      "status": "completed",
+      "attempts": 2,
+      "retriesUsed": 1,
+      "error": null
+    }
+  ],
+  "summary": {
+    "totalWifi": 14,
+    "completedWifi": 14,
+    "failedWifi": 0,
+    "skippedWifi": 0,
+    "completionRate": 100,
+    "totalFlowAttempts": 28,
+    "totalRetries": 14,
+    "overall": "completed"
+  },
+  "savedAt": "2026-07-22T06:39:19.823Z"
+}

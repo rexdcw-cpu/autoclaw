@@ -4,6 +4,21 @@
 
 ---
 
+## [0.3.12] — 2026-07-22
+- **feat(wifi 轮询)：单个 WIFI 流程失败重试，而非立即跳过**
+  - 原行为：某 WIFI 的 engine.run 返回 FAILED 即标记该 WIFI 失败并跳过，整体标记 FAILED。
+  - 新行为：某 WIFI 流程熔断后，在「该 WIFI 内」重跑，最多重试 `AUTOCLAW_WIFI_FLOW_RETRIES` 次
+    （默认 3，即该 WIFI 最多跑 1+3=4 次）；全部尝试仍失败才标记该 WIFI 失败并跳过，继续下一个 WIFI。
+  - 重试前短暂停顿 `AUTOCLAW_WIFI_RETRY_GAP_MS`（默认 2000ms），避免把瞬时故障放大。
+  - 暂停/停止（PAUSED/STOPPED）受控中断不再重试，立即跳出。
+- **feat(stats)：任务完成度统计与分析，持久化保存**
+  - 新增 `core/taskStats.js`：汇总每个 WIFI/网络的流程尝试次数、重试次数、终态，计算完成率与累计重试。
+  - 任务结束自动写盘：`data/task-stats-<taskId>.json`、`data/task-stats-<taskId>.md`（人类可读分析）、
+    `data/task-completion-stats.json`（滚动汇总日志，保留最近 200 条）；数据目录可由 `AUTOCLAW_STATS_DIR` 覆盖。
+  - worker 结束前推送一条 `TASK_STATS` 进度事件（含 summary + 明细），前端可实时展示。
+  - progressEvent 新增 `EventType.TASK_STATS`。
+- 验证：`test/wifiPoll.test.js` 扩至 9 例（覆盖重试成功/重试耗尽/统计汇总/非轮询统计），`node --test` 全过。
+
 ## [0.3.11] — 2026-07-22
 - 新增「WIFI 轮询」任务模式：任务表单增加复选框「轮询切换 WIFI」。
 - 勾选后：每跑完一轮完整流程自动切换下一个可用 WIFI（本机已存凭证、可无密码直连的网络），
