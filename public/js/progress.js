@@ -28,6 +28,7 @@
   var $pause = document.getElementById('pause-btn');
   var $stop = document.getElementById('stop-btn');
   var $resubmit = document.getElementById('resubmit-link');
+  var $wifiPoll = document.getElementById('wifi-poll');
 
   $taskId.textContent = taskId || '—';
 
@@ -146,6 +147,14 @@
           re.totalRounds + ' 轮 结束: <b>' + (re.status === 'success' ? '成功' : '失败') + '</b>' +
           (re.error ? ' (' + escapeHtml(re.error) + ')' : ''),
         re.status === 'success' ? 'line-ok' : 'line-fail',
+      );
+    } else if (type === 'wifi_poll') {
+      if ($wifiPoll && ev.wifiTotal) {
+        $wifiPoll.textContent = (ev.wifiIndex || 0) + ' / ' + ev.wifiTotal;
+      }
+      appendLine(
+        '<span class="t">' + escapeHtml(ev.timestamp) + '</span> 🔄 ' + escapeHtml(ev.message),
+        'line-round',
       );
     } else if (type === 'alert') {
       showAlert(ev.message);

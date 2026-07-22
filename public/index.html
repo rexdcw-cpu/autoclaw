@@ -120,6 +120,13 @@
           <small class="hint">为本次任务指定出口代理，降低同一 IP 反复搜索触发风控的概率。支持 http(s):// 或 socks(5):// 形式；留空则不走代理。</small>
         </div>
 
+        <!-- WIFI 轮询（本次任务新增） -->
+        <fieldset class="field">
+          <legend>WIFI 轮询（可选）</legend>
+          <label class="check"><input type="checkbox" id="poll-wifi" name="poll-wifi" /> 轮询切换 WIFI（勾选后：每跑完一轮流程自动切换下一个可用 WIFI，全部可用 WIFI 跑完才算任务完成）</label>
+          <small class="hint">不勾选则只跑当前网络一次即完成。轮询仅遍历本机已保存密码的「可用 WIFI」，切下一个前停留 5 秒。</small>
+        </fieldset>
+
         <!-- 令牌（决策 A3） -->
         <div class="field">
           <label for="token">访问令牌（token）</label>

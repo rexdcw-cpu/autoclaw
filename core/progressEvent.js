@@ -27,6 +27,7 @@ const EventType = {
   PAUSED: 'paused',
   STOPPED: 'stopped',
   ALERT: 'alert',
+  WIFI_POLL: 'wifi_poll', // WIFI 轮询进度（切换/停留/第几轮）
 };
 
 /** 原子步骤名称（StepName） */
@@ -180,6 +181,13 @@ function makeProgress(o) {
     message: o.message || '',
     stats: o.stats || null,
     status: o.status || undefined,
+    // v0.3.11 WIFI 轮询附加字段（透传，避免被裁剪）
+    wifiIndex: o.wifiIndex != null ? o.wifiIndex : undefined,
+    wifiTotal: o.wifiTotal != null ? o.wifiTotal : undefined,
+    ssid: o.ssid || undefined,
+    // 错误透传（worker 异常 / 步骤失败携带，供历史回查）
+    error: o.error || undefined,
+    errorCode: o.errorCode || undefined,
     timestamp: now(),
   };
 }

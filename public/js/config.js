@@ -104,6 +104,9 @@
     var proxyVal = proxyEl ? proxyEl.value.trim() : '';
     var proxy = proxyVal ? proxyVal : null;
 
+    var pollEl = document.getElementById('poll-wifi');
+    var pollWifi = !!(pollEl && pollEl.checked);
+
     var payload = {
       platforms: platforms,
       keywords: keywords,
@@ -116,6 +119,7 @@
       proxy: proxy,
     };
     if (clientId) payload.clientId = clientId;
+    if (pollWifi) payload.pollWifi = true;
 
     var btn = document.getElementById('submit-btn');
     btn.disabled = true;

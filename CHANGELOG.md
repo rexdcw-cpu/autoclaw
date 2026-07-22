@@ -4,6 +4,15 @@
 
 ---
 
+## [0.3.11] — 2026-07-22
+- 新增「WIFI 轮询」任务模式：任务表单增加复选框「轮询切换 WIFI」。
+- 勾选后：每跑完一轮完整流程自动切换下一个可用 WIFI（本机已存凭证、可无密码直连的网络），
+  停留 5 秒后重跑，直到所有可用 WIFI 都跑过一遍才算任务完成。
+- 不勾选（默认）：仅跑当前网络一次即完成（原有行为）。
+- 后端：wifiManager 新增 listSavedProfiles / getConnectableNetworks / connectSaved；
+  taskConfig 解析 pollWifi 字段；worker 实现轮询外层循环 + 暂停/停止中断 + WIFI_POLL 进度事件。
+- 进度页新增「WIFI 轮询 i/n」状态条，实时显示当前第几个 / 共几个可用 WIFI。
+
 ## [0.3.10] — 2026-07-22
 - **fix(web): 静态资源禁用缓存，根治「刷新还是老问题」**
   - 根因：`app.js` 用 `express.static` 提供前端文件且无 `Cache-Control` 头，`index.html` 里 `<script src="/js/wifi.js">` 也无版本号，浏览器缓存了旧 `wifi.js`，服务端虽已升到 v0.3.9，前端仍跑旧逻辑 → 表现为 WiFi 信息不更新。

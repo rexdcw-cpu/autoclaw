@@ -72,6 +72,7 @@ async function getInterface() {
 
 /** 返回当前已连接 SSID（未连接返回 ''）。 */
 async function getCurrentSsid(iface) {
+  iface = iface || (await getInterface());
   const out = await runNetsh('show interfaces interface="' + iface + '"');
   const m = out.match(/^\s*SSID\s*:\s*(.+)$/m);
   const st = out.match(/状态\s*:\s*(.+)$/m) || out.match(/State\s*:\s*(.+)$/m);
@@ -290,6 +291,68 @@ async function connect(ssid, password) {
   }
 }
 
+/**
+ * 列出本机已保存（含凭证）的 WIFI 配置文件名。
+ * @returns {Promise<Set<string>>}
+ */
+async function listSavedProfiles() {
+  const out = await runNetsh('show profiles');
+  const set = new Set();
+  const re = /(?:所有用户配置文件|当前用户配置文件|Current User Profile|All User Profile)\s*:\s*(.+)/;
+  String(out || '')
+    .split(/\r?\n/)
+    .forEach((line) => {
+      const m = line.match(re);
+      if (m && m[1].trim()) set.add(m[1].trim());
+    });
+  return set;
+}
+
+/**
+ * 取「可见且本机已保存凭证」的 WIFI 列表（顺序同前端可见列表）。
+ * 这些 WIFI 可无密码直连（netsh wlan connect），即轮询所需的「可用 WIFI」。
+ * @returns {Promise<string[]>}
+ */
+async function getConnectableNetworks() {
+  // 候选 = 本机已保存凭证（可无密码直连）的全部 WIFI，即「可用 WIFI」。
+  // 当前已连的置顶作为轮询起点；其余按 netsh 配置顺序。
+  // 不限于当前可见列表：已连但未出现在扫描结果的 WIFI 也必须纳入，
+  // 否则轮询序列会漏掉当前网络。切到信号外的 WIFI 时 connectSaved 会失败，
+  // worker 层会跳过并继续下一个，不阻塞整体轮询。
+  const saved = await listSavedProfiles();
+  const arr = Array.from(saved);
+  const cur = await getCurrentSsid();
+  if (cur && saved.has(cur)) {
+    const idx = arr.indexOf(cur);
+    if (idx > 0) {
+      arr.splice(idx, 1);
+      arr.unshift(cur);
+    }
+  }
+  return arr;
+}
+
+/**
+ * 切换到本机已保存凭证的 WIFI（无需密码，直接 netsh wlan connect）。
+ * @param {string} ssid
+ * @returns {Promise<{ok:boolean, code?:string, message:string}>}
+ */
+async function connectSaved(ssid) {
+  const iface = await getInterface();
+  const conn = await runNetsh('connect name="' + ssid + '" interface="' + iface + '"');
+  for (let i = 0; i < 8; i += 1) {
+    const cur = await getCurrentSsid(iface);
+    if (cur === ssid) return { ok: true, message: '已连接到『' + ssid + '』' };
+    await sleep(1000);
+  }
+  return {
+    ok: false,
+    code: 'ERR_WIFI_CONNECT_FAILED',
+    message: '切换至『' + ssid + '』未完成（信号弱或凭证失效）',
+    diagnostics: { conn },
+  };
+}
+
 module.exports = {
   runNetsh,
   runNetshRaw,
@@ -300,6 +363,9 @@ module.exports = {
   buildProfileXml,
   listNetworks,
   connect,
+  listSavedProfiles,
+  getConnectableNetworks,
+  connectSaved,
   getLocalIp,
   getWifiLocalIp,
   getPublicGeo,

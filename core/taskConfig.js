@@ -132,6 +132,9 @@ function buildTaskConfig(payload) {
   // --- 客户归属（P0-9）：可选，缺省不关联 ---
   const clientId = payload.clientId || payload.client_id || null;
 
+  // --- WIFI 轮询（v0.3.11）：勾选后任务跑完一轮流程自动切下一个可用 WIFI ---
+  const pollWifi = !!payload.pollWifi;
+
   const taskId = payload.taskId || crypto.randomUUID();
   const rounds = buildRounds(platforms, keywords);
 
@@ -145,6 +148,7 @@ function buildTaskConfig(payload) {
     strategy: strategy,
     proxy: proxy,
     clientId: clientId,
+    pollWifi: pollWifi,
     createdAt: new Date().toISOString(),
     status: TaskStatus.PENDING,
     rounds: rounds,
