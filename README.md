@@ -187,3 +187,11 @@ node app.js
 | GET  | `/api/task/history` | 历史配置列表（created_at DESC，F-24） |
 | GET  | `/api/task/logs?taskId=` | 运行记录时间线 + 成功率/失败率（F-25） |
 | GET  | `/api/status` | 健康检查（不鉴权） |
+
+---
+
+## License
+
+本项目以 [MIT License](./LICENSE) 开源发布。© 2026 rexdcw-cpu。
+
+欢迎在遵守 MIT 协议的前提下自由使用、修改与分发。如需协作开发，请直接 fork / clone 本仓库，或提交 Pull Request。
