@@ -23,6 +23,14 @@
  *   - 完成度统计：每个 WIFI/网络的尝试次数、重试次数、终态都被记录，任务结束后
  *     汇总成完成度分析并持久化（core/taskStats），并推一条 TASK_STATS 进度事件。
  *
+ * v0.3.13 变更（轮询序列来源纠偏）：
+ *   - 之前轮询序列取自 Windows 全部已保存配置文件（本机残留的 14 个），
+ *     其中 5 个早已不在范围内、切过去必败，白白占轮、拉低完成率。
+ *   - 现改为：优先使用面板「已存」集合（config.rememberedWifis，由前端从
+ *     localStorage 透传——即你在 WiFi 面板里「记住密码」的网络，如 7 个），
+ *     与 Windows 全部历史配置文件解耦；序列只保留当前可见（在范围内）的，
+ *     当前已连置顶。未传该集合（直接调 API）时回退到「可见且已存凭证」的 WIFI。
+ *
  * 可测试性：轮询主体抽成 runTask(config, emit, opts)，opts 可注入 engineFactory
  * 与 wifi 模块，便于单测在「不切真网 / 不起 Chrome」的情况下验证轮询逻辑。
  */
@@ -71,10 +79,27 @@ async function runTask(config, emit, opts) {
   const wm = opts.wifi || wifi;
   const wait = opts.sleep || sleep;
   const statsMod = opts.statsModule || taskStats;
-  const retryWait = opts.retrySleep || (() => Promise.resolve());
+  const retryWait = opts.retrySleep || ((ms) => sleep(ms));
   const MAX_RETRIES = (opts.maxRetries != null)
     ? opts.maxRetries
     : (parseInt(process.env.AUTOCLAW_WIFI_FLOW_RETRIES, 10) || 3);
+
+  // 轮询模式下，子进程 engine.run() 每跑完一个 WIFI 的完整流程会 emit 一次 TASK_END
+  // （"任务结束"）。若原样推给前端，进度页会在一个轮询任务里出现多次"■ 任务结束"，
+  // 看起来像任务中途断了。这里把它改写为一条普通的 wifi_poll「子流程结束」提示
+  // （保留 stats 供实时失败率），真正的终态框只由 worker 末尾的 TASK_END 渲染。
+  const engineEmit = (ev) => {
+    if (config.pollWifi && ev && ev.type === EventType.TASK_END) {
+      emit(P.makeProgress({
+        taskId: config.taskId,
+        type: EventType.WIFI_POLL,
+        message: '【WIFI 子流程结束】' + (ev.message || '本轮流程已结束'),
+        stats: ev.stats || null,
+      }));
+      return;
+    }
+    emit(ev);
+  };
 
   abort = false;
   abortStatus = TaskStatus.STOPPED;
@@ -83,20 +108,51 @@ async function runTask(config, emit, opts) {
   // ---- 构建 WIFI 轮询序列（仅 pollWifi）----
   let seq = null;
   if (config.pollWifi) {
-    const list = await wm.getConnectableNetworks(); // 可见且已存凭证，顺序同前端
     const current = await wm.getCurrentSsid();
-    seq = list.slice();
-    const ci = current ? seq.indexOf(current) : -1;
-    if (ci > 0) {
-      const [c] = seq.splice(ci, 1);
-      seq.unshift(c);
-    } else if (ci === -1 && current) {
-      seq.unshift(current);
+    // 优先使用面板「已存」集合（前端从 localStorage 透传的 rememberedWifis），
+    // 即你在 WiFi 面板里「记住密码」的网络（如当前的 7 个），与 Windows 全部
+    // 历史已保存配置文件解耦——避免把早就搬走/信号外、却仍残留在本机的网络也轮询进来空跑。
+    let source;
+    let usedRemembered = false;
+    if (Array.isArray(config.rememberedWifis) && config.rememberedWifis.length) {
+      // 优先：面板「已存」集合（前端从 localStorage 透传），与 Windows 历史配置解耦
+      source = config.rememberedWifis.slice();
+      usedRemembered = true;
+    } else {
+      // 兜底：未显式传已存集合（如提交时面板没有已存 WiFi、或非面板入口）时，
+      // 回退到「可见且本机已存凭证」的 WIFI（getConnectableNetworks）。
+      source = await wm.getConnectableNetworks();
     }
+    // 仅保留当前可见（在范围内）的，避免切连不存在的网络白白占一轮；
+    // 全部不可见（极端情况）则回退到 source 本身，交由 connectSaved 跳过失败项。
+    const visible = await wm.listNetworks();
+    const visibleSet = new Set(visible.map((n) => n.ssid));
+    const beforeLen = source.length;
+    let pool = source.filter((s) => visibleSet.has(s));
+    const excludedNotVisible = beforeLen - pool.length;
+    if (pool.length === 0) pool = source.slice();
+    // 当前已连且可见但不在 source 内时，仍置顶（绝不跳过正在使用的网络）
+    if (current && !pool.includes(current) && visibleSet.has(current)) {
+      pool.unshift(current);
+    }
+    // 当前已连置顶作为轮询起点
+    if (current && pool.includes(current)) {
+      const ci = pool.indexOf(current);
+      if (ci > 0) {
+        const [c] = pool.splice(ci, 1);
+        pool.unshift(c);
+      }
+    }
+    seq = pool;
+    // 诚实说明序列来源：面板已存 vs 兜底，避免把「兜底全部可见网络」伪装成「已存」
+    const sourceDesc = usedRemembered
+      ? ('面板『已存』集合遍历 ' + seq.length + ' 个 WIFI（共 ' + beforeLen + ' 个已存' +
+        (excludedNotVisible ? '，已剔除不可见 ' + excludedNotVisible + ' 个' : '') + '）')
+      : ('兜底遍历 ' + seq.length + ' 个 WIFI（可见且本机已存凭证，未收到面板已存集合）');
     emit(P.makeProgress({
       taskId: config.taskId,
       type: EventType.WIFI_POLL,
-      message: 'WIFI 轮询已启用，共 ' + seq.length + ' 个可用 WIFI（从『' + (seq[0] || current || '当前网络') + '』开始），单个 WIFI 流程失败将重试 ' + MAX_RETRIES + ' 次',
+      message: 'WIFI 轮询已启用：按' + sourceDesc + '，从『' + (seq[0] || current || '当前网络') + '』开始，单个 WIFI 流程失败将重试 ' + MAX_RETRIES + ' 次',
       wifiIndex: 0,
       wifiTotal: seq.length,
     }));
@@ -107,7 +163,8 @@ async function runTask(config, emit, opts) {
   const run = statsMod.newRun(config.taskId, {
     pollWifi: config.pollWifi,
     startedAt: config.startedAt,
-    keyword: config.keyword,
+    keyword: (config.keywords && config.keywords.length === 1) ? config.keywords[0] : null,
+    keywords: config.keywords || null,
     clientId: config.clientId,
   });
 
@@ -159,7 +216,7 @@ async function runTask(config, emit, opts) {
     let controlBreak = false;
     for (let r = 0; r <= MAX_RETRIES; r += 1) {
       attempts += 1;
-      engine = makeEngine(config, emit);
+      engine = makeEngine(config, engineEmit);
       const st = await engine.run();
 
       if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) {

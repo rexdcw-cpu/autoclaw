@@ -44,6 +44,7 @@ function newRun(taskId, meta) {
     startedAt: meta.startedAt || new Date().toISOString(),
     pollWifi: !!meta.pollWifi,
     keyword: meta.keyword || null,
+    keywords: meta.keywords || null,
     clientId: meta.clientId || null,
     perWifi: [], // { ssid, status:'completed'|'failed'|'skipped', attempts, retriesUsed, error }
     summary: null,
@@ -98,7 +99,10 @@ function renderMarkdown(run) {
   lines.push('# 任务完成度分析 — ' + run.taskId);
   lines.push('');
   lines.push('- 任务模式：' + (run.pollWifi ? 'WIFI 轮询（遍历全部可用 WIFI）' : '单网络（仅当前网络一次）'));
-  lines.push('- 关键词：' + (run.keyword || '(未指定)'));
+  const kw = (run.keywords && run.keywords.length)
+    ? run.keywords.join('、')
+    : (run.keyword || '(未指定)');
+  lines.push('- 关键词：' + kw);
   lines.push('- 客户：' + (run.clientId || '(未指定)'));
   lines.push('- 开始时间：' + run.startedAt);
   lines.push('- 保存时间：' + (run.savedAt || new Date().toISOString()));
@@ -162,6 +166,7 @@ function save(run) {
     savedAt: run.savedAt,
     pollWifi: run.pollWifi,
     keyword: run.keyword,
+    keywords: run.keywords,
     clientId: run.clientId,
     summary: run.summary,
   });

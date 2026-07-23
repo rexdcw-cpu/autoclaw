@@ -34,6 +34,36 @@
       });
   }
 
+  function getRememberedWifis() {
+    try {
+      var raw = localStorage.getItem('autoclaw_wifi_pw_v1');
+      var obj = raw ? JSON.parse(raw) : {};
+      return Object.keys(obj || {}).filter(function (s) { return !!s; });
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function updatePollHint() {
+    var hintEl = document.getElementById('poll-wifi-hint');
+    if (!hintEl) return;
+    var pollEl = document.getElementById('poll-wifi');
+    if (!pollEl || !pollEl.checked) {
+      hintEl.textContent = '';
+      hintEl.className = 'hint';
+      return;
+    }
+    var n = getRememberedWifis().length;
+    if (n === 0) {
+      // 提交前就暴露：没有已存集合会回退轮询全部可见网络（不限于你记住的）
+      hintEl.textContent = '⚠️ 面板没有已存 WiFi 密码，将回退轮询全部可见网络（不限于你记住的）';
+      hintEl.className = 'hint warn';
+    } else {
+      hintEl.textContent = '将轮询『已存』的 ' + n + ' 个 WIFI（即面板里记住密码的网络）';
+      hintEl.className = 'hint';
+    }
+  }
+
   function numOrNull(id) {
     var v = document.getElementById(id).value.trim();
     if (v === '') return undefined;
@@ -119,7 +149,12 @@
       proxy: proxy,
     };
     if (clientId) payload.clientId = clientId;
-    if (pollWifi) payload.pollWifi = true;
+    if (pollWifi) {
+      payload.pollWifi = true;
+      // 仅轮询面板「已存」的 WIFI（localStorage 记住密码的 SSID），与 Windows 全部历史已保存配置文件解耦
+      var remembered = getRememberedWifis();
+      if (remembered.length) payload.rememberedWifis = remembered;
+    }
 
     var btn = document.getElementById('submit-btn');
     btn.disabled = true;
@@ -373,4 +408,9 @@
 
   // 令牌就绪后加载客户列表（令牌可能来自 localStorage 或默认值）
   loadClients();
+
+  // 轮询 WIFI 复选框的实时提示：显示将轮询多少个「已存」WIFI
+  var pollElHint = document.getElementById('poll-wifi');
+  if (pollElHint) pollElHint.addEventListener('change', updatePollHint);
+  updatePollHint();
 })();

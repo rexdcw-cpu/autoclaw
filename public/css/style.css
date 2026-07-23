@@ -90,6 +90,10 @@ body {
   display: block;
   margin-top: 6px;
 }
+.hint.warn {
+  color: var(--warn);
+  font-weight: 600;
+}
 
 code {
   background: var(--panel-2);
@@ -325,6 +329,62 @@ button.danger {
 }
 .line-round {
   color: var(--accent);
+}
+
+/* 任务完成度总结卡片 */
+#task-summary {
+  margin-top: 18px;
+}
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.summary-cell {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sc-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.sc-val {
+  font-size: 18px;
+  font-weight: 700;
+}
+.summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 14px;
+  font-size: 13px;
+}
+.summary-table th,
+.summary-table td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.summary-table th {
+  color: var(--muted);
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.03);
+}
+.summary-table .err {
+  color: var(--fail);
+  max-width: 320px;
+}
+.summary-table .muted {
+  color: var(--muted);
+}
+.badge.skip {
+  background: rgba(250, 204, 21, 0.18);
+  color: var(--warn);
 }
 
 /* 客户管理面板（V2 客户线） */

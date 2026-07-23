@@ -29,6 +29,7 @@
   var $stop = document.getElementById('stop-btn');
   var $resubmit = document.getElementById('resubmit-link');
   var $wifiPoll = document.getElementById('wifi-poll');
+  var $summary = document.getElementById('task-summary');
 
   $taskId.textContent = taskId || '—';
 
@@ -165,9 +166,55 @@
           (STATUS_LABEL[ev.status] || ev.status) + '</b>',
         'line-round',
       );
+    } else if (type === 'task_stats') {
+      renderSummary(ev);
     }
 
-    if (ev.stats) updateStats(ev.stats);
+    // 仅对「逐步成功率」统计更新失败率；task_stats 的 summary 是 WIFI 维度，字段不同，不能误用
+    if (ev.stats && ev.stats.failRate != null) updateStats(ev.stats);
+  }
+
+  // ----- 任务完成度总结卡片（task_stats 事件触发）-----
+  function summaryCell(label, val) {
+    return '<div class="summary-cell"><span class="sc-label">' + escapeHtml(label) +
+      '</span><span class="sc-val">' + escapeHtml(String(val == null ? '' : val)) + '</span></div>';
+  }
+
+  function renderSummary(ev) {
+    if (!$summary) return;
+    var s = ev.stats || (ev.statsDetail && ev.statsDetail.summary);
+    if (!s) return;
+    var detail = ev.statsDetail;
+    var perWifi = (detail && detail.perWifi) || [];
+    var rate = s.completionRate != null ? s.completionRate
+      : (s.totalWifi ? Math.round((s.completedWifi / s.totalWifi) * 100) : 0);
+    var rows = perWifi.map(function (w, i) {
+      var st = w.status === 'completed' ? 'ok' : (w.status === 'failed' ? 'fail' : 'skip');
+      var stTxt = w.status === 'completed' ? '完成'
+        : (w.status === 'failed' ? '失败' : (w.status === 'skipped' ? '跳过' : (w.status || '—')));
+      return '<tr><td>' + (i + 1) + '</td><td>' + escapeHtml(w.ssid) + '</td>' +
+        '<td><span class="badge ' + st + '">' + stTxt + '</span></td>' +
+        '<td>' + (w.attempts || 1) + '</td><td>' + (w.retriesUsed || 0) + '</td>' +
+        (w.error ? '<td class="err">' + escapeHtml(w.error) + '</td>' : '<td class="muted">—</td>') + '</tr>';
+    }).join('');
+    $summary.hidden = false;
+    $summary.innerHTML =
+      '<div class="log-head"><h2>📊 任务完成度总结</h2>' +
+      '<span class="conn-state">' + (ev.message ? escapeHtml(ev.message) : '') + '</span></div>' +
+      '<div class="summary-grid">' +
+        summaryCell('轮询 WIFI 总数', s.totalWifi) +
+        summaryCell('完成', s.completedWifi) +
+        summaryCell('失败', s.failedWifi) +
+        summaryCell('跳过', s.skippedWifi) +
+        summaryCell('完成率', rate + '%') +
+        summaryCell('流程总尝试', s.totalFlowAttempts) +
+        summaryCell('累计重试', s.totalRetries) +
+        summaryCell('整体结论', s.overall) +
+      '</div>' +
+      (rows ? '<table class="summary-table"><thead><tr><th>#</th><th>WIFI / 网络</th>' +
+        '<th>终态</th><th>尝试</th><th>重试</th><th>备注</th></tr></thead><tbody>' + rows + '</tbody></table>'
+        : '<p class="hint">无逐 WIFI 明细</p>');
+    $summary.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
   function showAlert(message) {

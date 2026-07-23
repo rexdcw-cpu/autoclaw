@@ -123,8 +123,9 @@
         <!-- WIFI 轮询（本次任务新增） -->
         <fieldset class="field">
           <legend>WIFI 轮询（可选）</legend>
-          <label class="check"><input type="checkbox" id="poll-wifi" name="poll-wifi" /> 轮询切换 WIFI（勾选后：每跑完一轮流程自动切换下一个可用 WIFI，全部可用 WIFI 跑完才算任务完成）</label>
-          <small class="hint">不勾选则只跑当前网络一次即完成。轮询仅遍历本机已保存密码的「可用 WIFI」，切下一个前停留 5 秒。</small>
+          <label class="check"><input type="checkbox" id="poll-wifi" name="poll-wifi" /> 轮询切换 WIFI（勾选后：每跑完一轮流程自动切换下一个 WIFI，全部 WIFI 跑完才算任务完成）</label>
+          <small class="hint">不勾选则只跑当前网络一次即完成。轮询仅遍历面板里「已存」（记住密码）的 WIFI，切下一个前停留 5 秒。</small>
+          <div id="poll-wifi-hint" class="poll-hint"></div>
         </fieldset>
 
         <!-- 令牌（决策 A3） -->

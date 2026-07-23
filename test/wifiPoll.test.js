@@ -18,7 +18,8 @@ const { EventType, TaskStatus } = require('../core/progressEvent');
 const taskStats = require('../core/taskStats');
 
 /** 构造假 wifi 模块：connectable=可见已存凭证列表；current=当前已连；fail=切换失败的 ssid 集合。
- *  切换成功后把 state.ssid 更新为当前 WIFI，供假 engine 按 WIFI 区分尝试结果。 */
+ *  切换成功后把 state.ssid 更新为当前 WIFI，供假 engine 按 WIFI 区分尝试结果。
+ *  listNetworks 默认在 connectable 基础上补上当前已连（契合「已连一定可见」的真实行为）。 */
 function makeWifi({ connectable, current, fail }) {
   const state = { ssid: current || null };
   const connectCalls = [];
@@ -27,6 +28,11 @@ function makeWifi({ connectable, current, fail }) {
     state,
     getConnectableNetworks: async () => connectable.slice(),
     getCurrentSsid: async () => current,
+    listNetworks: async () => {
+      const set = new Set(connectable);
+      if (current) set.add(current);
+      return Array.from(set).map((s) => ({ ssid: s }));
+    },
     connectSaved: async (ssid) => {
       connectCalls.push(ssid);
       if (fail && fail.includes(ssid)) {
@@ -314,4 +320,60 @@ test('v0.3.12：非轮询记录单条；全失败统计 failed 且重试计入',
   assert.strictEqual(run.summary.failedWifi, 1);
   assert.strictEqual(run.summary.totalRetries, 2);
   assert.strictEqual(run.summary.overall, 'failed');
+});
+
+// ---------------------------------------------------------------------------
+// 10) v0.3.13：rememberedWifis 优先——严格只遍历「已存 ∩ 可见」，不回退 getConnectableNetworks
+// ---------------------------------------------------------------------------
+test('v0.3.13：rememberedWifis 优先，仅遍历已存且可见的 WIFI，不调用兜底', async () => {
+  const connectableFallback = ['X', 'Y', 'Z']; // 兜底集，传了 remembered 时不应被使用
+  const remembered = ['ROSNET5', 'ROSNET2', 'HOME']; // 面板「已存」集合
+  const current = 'ROSNET5';
+  const visible = ['ROSNET5', 'HOME']; // ROSNET2 当前不可见（范围内搜不到）
+  let fallbackCalled = false;
+  const connectCalls = [];
+  const wifi = {
+    getConnectableNetworks: async () => { fallbackCalled = true; return connectableFallback.slice(); },
+    getCurrentSsid: async () => current,
+    listNetworks: async () => visible.map((s) => ({ ssid: s })),
+    connectSaved: async (ssid) => { connectCalls.push(ssid); return { ok: true, message: 'ok' }; },
+  };
+  const ef = makeEngineFactory();
+  const cfg = { taskId: 't-remembered', pollWifi: true, rememberedWifis: remembered };
+
+  const { status, events } = await runWith(cfg, wifi, ef);
+
+  assert.strictEqual(status, TaskStatus.COMPLETED);
+  assert.strictEqual(fallbackCalled, false, '传了 rememberedWifis 不应回退 getConnectableNetworks');
+  // ROSNET2 不可见被剔除，只跑 ROSNET5(当前) + HOME
+  assert.strictEqual(ef.runCalls.length, 2, '不可见的 ROSNET2 应被剔除');
+  assert.deepStrictEqual(connectCalls, ['HOME'], '当前 ROSNET5 不切，仅连 HOME');
+  const wp = wifiPollEvents(events);
+  assert.ok(wp[0].message.includes('2 个') && wp[0].message.includes('已存'), '启用事件应显示面板已存的 2 个');
+  assert.ok(wp[0].message.includes('ROSNET5'), '从 ROSNET5 开始');
+});
+
+// ---------------------------------------------------------------------------
+// 11) v0.3.13：rememberedWifis 不含当前网络、但当前可见 → 当前被置顶
+// ---------------------------------------------------------------------------
+test('v0.3.13：当前网络不在 rememberedWifis 但可见时仍置顶', async () => {
+  const remembered = ['ROSNET2', 'HOME'];
+  const current = 'ROSNET5';
+  const visible = ['ROSNET5', 'ROSNET2', 'HOME'];
+  const connectCalls = [];
+  const wifi = {
+    getConnectableNetworks: async () => ['X'],
+    getCurrentSsid: async () => current,
+    listNetworks: async () => visible.map((s) => ({ ssid: s })),
+    connectSaved: async (ssid) => { connectCalls.push(ssid); return { ok: true }; },
+  };
+  const ef = makeEngineFactory();
+  const cfg = { taskId: 't-remembered-cur', pollWifi: true, rememberedWifis: remembered };
+
+  const { events } = await runWith(cfg, wifi, ef);
+
+  const wp = wifiPollEvents(events);
+  assert.strictEqual(wp[0].wifiTotal, 3, '总数应为 3（当前 + 2 已存）');
+  assert.ok(wp[0].message.includes('ROSNET5'), '当前 ROSNET5 应被置顶');
+  assert.deepStrictEqual(connectCalls, ['ROSNET2', 'HOME']);
 });

@@ -4,6 +4,57 @@
 
 ---
 
+## [0.3.14] — 2026-07-23
+- **fix(ui)：任务结束后展示「完成度总结」卡片**
+  - 根因：`progress.js` 的 `renderEvent` 没有处理后端早已发出的 `task_stats` 事件（含汇总 + 逐 WIFI 明细），
+    导致任务跑完前端看不到任何聚合总结，用户只能去翻 `data/task-stats-*.md` 文件。
+  - 修复：进度页 `task_stats` 事件触发时渲染总结卡片——总数/完成/失败/跳过/完成率/总尝试/累计重试/整体结论，
+    以及逐 WIFI 终态、尝试次数、重试次数、失败备注表格；并修正 `updateStats` 误把 WIFI 维度 summary 当逐步失败率。
+  - progress.html 新增 `#task-summary` 容器，style.css 补充 `.summary-grid/.summary-cell/.summary-table/.hint.warn/.badge.skip` 样式。
+- **fix(透明度)：WIFI 轮询启用消息诚实标注序列来源**
+  - 原消息写死「仅遍历『已存』的 N 个 WIFI」，即使实际走兜底（未收到面板已存集合）也这么说，误导用户以为只轮询已存的。
+  - 新消息区分两种来源：收到 `rememberedWifis` →「按面板『已存』集合的 N 个（已剔除不可见 M 个）遍历」；
+    走兜底 →「按兜底：可见且本机已存凭证的 M 个（未收到面板已存集合，将轮询全部可见网络）遍历」。
+- **fix(ui)：提交前提示轮询范围**
+  - 轮询复选框勾选后，若面板「已存」WiFi 数为 0，提示「⚠️ 面板没有已存 WiFi 密码，将回退轮询全部可见网络」，提交前即可发现会走兜底。
+
+---
+
+## [0.3.15] — 2026-07-23
+- **fix(进度透明度)：轮询任务不再误报「任务结束」**
+  - 根因：`taskEngine.run()` 每跑完一个 WIFI 的完整流程就 emit 一次 `TASK_END`（"任务结束"）。
+    轮询任务含多个 WIFI，进度页于是把一个任务渲染成 N 次「■ 任务结束」，看起来像任务中途断了 N 次。
+  - 修复：`worker.js` 在轮询模式下把子流程的 `TASK_END` 改写为一条普通 `wifi_poll`「【WIFI 子流程结束】…」提示
+    （保留 stats 供实时失败率），真正的终态框只由 worker 末尾的 `TASK_END` 渲染一次。
+- **fix(统计准确性)：完成度总结记录真实跑过的关键词**
+  - 根因：`taskConfig` 只产出 `keywords` 数组（如 万年移民/万年移民公司/万年移民中介），没有单数 `keyword`，
+    而 `worker.js` 传给统计的是 `config.keyword`（undefined）→ 总结里「关键词」恒为"(未指定)"。
+  - 修复：`worker.js` 同时透传 `keywords`；`taskStats.newRun/renderMarkdown` 改用关键词列表展示。
+- **fix(重试间隔 env 失效)：`AUTOCLAW_WIFI_RETRY_GAP_MS` 现在真正生效**
+  - 根因：生产默认 `retryWait` 是空函数，重试 0 间隔连发，env 设了不生效（注释却写"默认 2 秒"自相矛盾）。
+  - 修复：默认 `retryWait` 改为 `sleep(ms)`，重试前按 `RETRY_GAP_MS`（默认 2000）停顿，env 可覆盖。
+- **fix(数据卫生)：清理滚动汇总里的假任务**
+  - `data/task-completion-stats.json` 混入了 99 条单测/e2e 假任务（`t-nonpoll`/`t-poll-0` 等），污染真实统计。
+  - 已一次性剔除并删除对应 18 个 `task-stats-t-*.{json,md}` 假文件；后续 e2e 请用 `AUTOCLAW_STATS_DIR` 隔离写盘
+    （`taskStats` 已支持该 env）。
+
+---
+
+## [0.3.13] — 2026-07-23
+- **fix(wifi 轮询)：轮询序列改为「面板已存集合」驱动，严格只遍历用户记住密码的 WiFi**
+  - 根因：上一版的 `getConnectableNetworks()` 取的是 Windows `netsh wlan show profiles` 全部配置文件
+    （本机 14 个），与控制台 WiFi 面板的「🔑已存（localStorage）」不是同一数据源——面板只显示
+    7 个（含当前 805_5G），但轮询却跑了 14 轮，其中 5 个早已搜不到、白白占轮、拉低完成率。
+  - 修复：勾选轮询时，前端在提交时把面板「已存」集合（localStorage `autoclaw_wifi_pw_v1` 的 SSID 列表）
+    作为 `rememberedWifis` 透传给后端；`scripts/worker.js` 优先用它构建序列，**与 Windows 全部历史
+    配置文件解耦**。序列再与 `listNetworks()`（当前可见）取交集剔除不可见的，当前已连置顶。
+    未传该集合（如直接调 API）时回退到「可见且本机已存凭证」的 WIFI（旧 `getConnectableNetworks`）。
+  - 效果：轮询序列 = 面板「已存」且当前可见的 WiFi（实测即 7 个，而非 14），完成率回到 100%。
+  - 前端增强：轮询复选框旁实时显示「将轮询『已存』的 N 个 WIFI」，提交前即可确认轮询范围。
+- 单测 `test/wifiPoll.test.js` 扩至 11 例（新增 rememberedWifis 优先、当前置顶等 2 例）。
+
+---
+
 ## [0.3.12] — 2026-07-22
 - **feat(wifi 轮询)：单个 WIFI 流程失败重试，而非立即跳过**
   - 原行为：某 WIFI 的 engine.run 返回 FAILED 即标记该 WIFI 失败并跳过，整体标记 FAILED。

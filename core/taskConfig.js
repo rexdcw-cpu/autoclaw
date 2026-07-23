@@ -134,6 +134,12 @@ function buildTaskConfig(payload) {
 
   // --- WIFI 轮询（v0.3.11）：勾选后任务跑完一轮流程自动切下一个可用 WIFI ---
   const pollWifi = !!payload.pollWifi;
+  // 面板「已存」集合（前端从 localStorage 透传的 rememberedWifis）：
+  // 即用户在 WiFi 面板里「记住密码」的 SSID，轮询严格只跑这些，
+  // 与 Windows 全部历史已保存配置文件解耦，避免轮询早已搬走/信号外的网络。
+  const rememberedWifis = Array.isArray(payload.rememberedWifis)
+    ? payload.rememberedWifis.map(String).filter(Boolean)
+    : [];
 
   const taskId = payload.taskId || crypto.randomUUID();
   const rounds = buildRounds(platforms, keywords);
@@ -149,6 +155,7 @@ function buildTaskConfig(payload) {
     proxy: proxy,
     clientId: clientId,
     pollWifi: pollWifi,
+    rememberedWifis: rememberedWifis,
     createdAt: new Date().toISOString(),
     status: TaskStatus.PENDING,
     rounds: rounds,

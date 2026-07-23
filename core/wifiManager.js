@@ -314,15 +314,20 @@ async function listSavedProfiles() {
  * @returns {Promise<string[]>}
  */
 async function getConnectableNetworks() {
-  // 候选 = 本机已保存凭证（可无密码直连）的全部 WIFI，即「可用 WIFI」。
-  // 当前已连的置顶作为轮询起点；其余按 netsh 配置顺序。
-  // 不限于当前可见列表：已连但未出现在扫描结果的 WIFI 也必须纳入，
-  // 否则轮询序列会漏掉当前网络。切到信号外的 WIFI 时 connectSaved 会失败，
-  // worker 层会跳过并继续下一个，不阻塞整体轮询。
+  // 候选 = 本机已保存凭证（可无密码直连）的全部 WIFI（Windows 配置文件）。
   const saved = await listSavedProfiles();
-  const arr = Array.from(saved);
+  // 关键修正：只保留「当前可见（在范围内）」的已存配置文件。
+  // netsh 的 show profiles 会把本机所有历史配置文件都列出来，包括早已搬走、
+  // 信号范围外、或 Windows 自动记下的网络——这些网络切过去必然失败
+  // （connectSaved 8s 轮询后报「信号弱或凭证失效」），纳入轮询只会白白占一轮
+  // 并拉低完成率。连不上的网络本就不应出现在序列里。
+  // 因此与当前扫描到的可见网络取交集，序列=「当前能搜到且本机有凭证」的 WIFI。
+  const visible = await listNetworks();
+  const visibleSet = new Set(visible.map((n) => n.ssid));
+  const arr = Array.from(saved).filter((ssid) => visibleSet.has(ssid));
+  // 当前已连的置顶作为轮询起点（当前网络一定在可见集合里，故必被保留）。
   const cur = await getCurrentSsid();
-  if (cur && saved.has(cur)) {
+  if (cur && arr.includes(cur)) {
     const idx = arr.indexOf(cur);
     if (idx > 0) {
       arr.splice(idx, 1);
