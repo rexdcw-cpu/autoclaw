@@ -107,13 +107,13 @@ async function runTask(config, emit, opts) {
 
   // ---- 构建 WIFI 轮询序列（仅 pollWifi）----
   let seq = null;
+  let usedRemembered = false;
   if (config.pollWifi) {
     const current = await wm.getCurrentSsid();
     // 优先使用面板「已存」集合（前端从 localStorage 透传的 rememberedWifis），
     // 即你在 WiFi 面板里「记住密码」的网络（如当前的 7 个），与 Windows 全部
     // 历史已保存配置文件解耦——避免把早就搬走/信号外、却仍残留在本机的网络也轮询进来空跑。
     let source;
-    let usedRemembered = false;
     if (Array.isArray(config.rememberedWifis) && config.rememberedWifis.length) {
       // 优先：面板「已存」集合（前端从 localStorage 透传），与 Windows 历史配置解耦
       source = config.rememberedWifis.slice();
@@ -166,6 +166,7 @@ async function runTask(config, emit, opts) {
     keyword: (config.keywords && config.keywords.length === 1) ? config.keywords[0] : null,
     keywords: config.keywords || null,
     clientId: config.clientId,
+    wifiSource: config.pollWifi ? (usedRemembered ? 'remembered' : 'fallback') : null,
   });
 
   for (let i = 0; i < order.length; i += 1) {

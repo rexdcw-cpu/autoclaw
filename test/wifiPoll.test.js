@@ -13,9 +13,15 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const os = require('os');
+const path = require('path');
 const { runTask } = require('../scripts/worker');
 const { EventType, TaskStatus } = require('../core/progressEvent');
 const taskStats = require('../core/taskStats');
+
+// 隔离统计落盘：大部分用例不注入 statsModule，会走真实 taskStats.save，
+// 因此把数据目录指向临时目录，避免污染生产 data/（含 task-completion-stats.json 滚动汇总）。
+process.env.AUTOCLAW_STATS_DIR = path.join(os.tmpdir(), 'autoclaw-test-stats');
 
 /** 构造假 wifi 模块：connectable=可见已存凭证列表；current=当前已连；fail=切换失败的 ssid 集合。
  *  切换成功后把 state.ssid 更新为当前 WIFI，供假 engine 按 WIFI 区分尝试结果。

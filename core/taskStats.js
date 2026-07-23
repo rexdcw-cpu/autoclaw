@@ -46,6 +46,7 @@ function newRun(taskId, meta) {
     keyword: meta.keyword || null,
     keywords: meta.keywords || null,
     clientId: meta.clientId || null,
+    wifiSource: meta.wifiSource || null, // 'remembered' | 'fallback' | null
     perWifi: [], // { ssid, status:'completed'|'failed'|'skipped', attempts, retriesUsed, error }
     summary: null,
   };
@@ -98,7 +99,11 @@ function renderMarkdown(run) {
   const lines = [];
   lines.push('# 任务完成度分析 — ' + run.taskId);
   lines.push('');
-  lines.push('- 任务模式：' + (run.pollWifi ? 'WIFI 轮询（遍历全部可用 WIFI）' : '单网络（仅当前网络一次）'));
+  lines.push('- 任务模式：' + (run.pollWifi
+    ? (run.wifiSource === 'fallback'
+        ? 'WIFI 轮询（兜底：可见且本机已存凭证）'
+        : 'WIFI 轮询（面板『已存』集合遍历）')
+    : '单网络（仅当前网络一次）'));
   const kw = (run.keywords && run.keywords.length)
     ? run.keywords.join('、')
     : (run.keyword || '(未指定)');

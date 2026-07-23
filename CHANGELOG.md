@@ -20,6 +20,21 @@
 
 ---
 
+## [0.3.16] — 2026-07-23
+- **fix(数据卫生，O1 回归根治)：单测不再污染生产 `data/`**
+  - 根因：上版只清理了假文件，但 `test/wifiPoll.test.js` 多数用例未注入 `statsModule`，
+    真实 `taskStats.save` 仍把 `t-*` 假任务写进 `data/task-stats-*.{json,md}` 与滚动汇总；一跑测试就复发。
+  - 修复：测试文件顶部设置 `process.env.AUTOCLAW_STATS_DIR` 指向 `os.tmpdir()` 临时目录，
+    所有未注入假模块的用例落盘到隔离目录，生产 `data/` 不再被污染。
+- **fix(统计透明度，O2)：完成度摘要据实标注轮询来源**
+  - 根因：`.md` 摘要「任务模式」写死「WIFI 轮询（遍历全部可用 WIFI）」，
+    实际可能是「面板已存集合」或「兜底」，文字与真实序列来源不符。
+  - 修复：`worker.js` 把 `wifiSource`（`remembered`/`fallback`）传给 `taskStats.newRun`，
+    摘要据实显示「面板『已存』集合遍历」或「兜底：可见且本机已存凭证」。
+- 单测 `test/wifiPoll.test.js` 11/11 通过；全量 245/1skip 通过。
+
+---
+
 ## [0.3.15] — 2026-07-23
 - **fix(进度透明度)：轮询任务不再误报「任务结束」**
   - 根因：`taskEngine.run()` 每跑完一个 WIFI 的完整流程就 emit 一次 `TASK_END`（"任务结束"）。

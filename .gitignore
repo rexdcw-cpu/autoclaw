@@ -7,6 +7,8 @@ logs/*.log.*
 
 # 本地数据/模板缓存
 data/*.json
+# 任务完成度统计报告（运行产物，不入库）
+data/task-stats-*.md
 
 # 运行时 SQLite 库（含任务日志，不入库）
 data/*.db
