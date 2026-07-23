@@ -1,0 +1,377 @@
+'use strict';
+
+/**
+ * test/googleAdapter.test.js
+ * ---------------------------------------------------------------------------
+ * 谷歌适配器「完善」后的回归测试，镜像 baiduAdapter.test.js 的模式：
+ * 用假 Playwright `page` 驱动适配器，其 `evaluate` 在受控作用域里执行适配器
+ * 注入的页面函数（带假 document/window/Event）。
+ *
+ * 锁定以下行为，任何回归立即失败：
+ *   1. open() 等待 `textarea[name="q"]` 且 state:'attached'（不要求可见）。
+ *   2. open() 命中 Google 同意页（consent.google.com）→ 自动点击「同意」并离开。
+ *   3. open() 命中验证码（google.com/sorry）→ 轮询等待手动过码 / 卡死抛 ERR_GOOGLE_CAPTCHA。
+ *   4. search() 步骤A 等待搜索框 attached；步骤B 用 evaluate 写值（无 fill）；
+ *      步骤C 用 evaluate 提交（requestSubmit，无 press/click API）；步骤D 等待 #rso。
+ *   5. locateTarget() 用 `#rso h3 a` 精准取标题主链接（修复旧版遍历全部 `a` 的噪声），
+ *      复用基类 matchTarget 做双匹配，未命中时抛出可诊断错误。
+ */
+
+const test = require('node:test');
+const assert = require('node:assert');
+
+const { GoogleAdapter } = require('../core/adapters/googleAdapter');
+
+// ---------------------------------------------------------------------------
+// 假 Playwright page
+// ---------------------------------------------------------------------------
+
+/** Native-ish HTMLInputElement.prototype with an own `value` accessor. */
+function makeInputProto() {
+  const proto = {};
+  Object.defineProperty(proto, 'value', {
+    configurable: true,
+    get() {
+      return this._v;
+    },
+    set(v) {
+      this._v = v;
+    },
+  });
+  return proto;
+}
+
+/**
+ * 构造假 page。行为由 opts 控制：
+ *   - startConsent: 初始落在同意页（URL=consent.google.com）。配合 opts.consent
+ *     （{accepted:false}）与 opts.consentButtons（含「同意」按钮）模拟同意流程。
+ *   - captchaPolls: 前 N 次轮询处于验证码页（URL=sorry），之后恢复正常结果页。
+ *   - resultAnchors: locateTarget 时 `page.$$('#rso h3 a')` 返回的假链接数组。
+ *   - baseUrl/baseBody: 正常（非同意/非验证码）时的 URL/正文。
+ */
+function makeGooglePage(opts = {}) {
+  const inputProto = makeInputProto();
+  const FakeEvent = function FakeEvent(type, o) {
+    this.type = type;
+    this.bubbles = !!(o && o.bubbles);
+  };
+  const calls = {
+    goto: [],
+    waitForSelector: [],
+    evaluate: [],
+    $$: [],
+    url: [],
+    kwValue: null,
+    kwEvents: [],
+    formSubmitted: false,
+  };
+
+  let poll = 0;
+  const captchaPolls = opts.captchaPolls || 0;
+  const onCaptcha = () => poll < captchaPolls;
+
+  const q = {
+    _v: '',
+    get value() {
+      return this._v;
+    },
+    set value(v) {
+      this._v = v;
+    },
+    dispatched: [],
+    dispatchEvent(ev) {
+      this.dispatched.push(ev && ev.type);
+    },
+  };
+  const form = {
+    submitted: false,
+    requestSubmit() {
+      this.submitted = true;
+    },
+  };
+  const consentButtons = opts.consentButtons || [];
+
+  const document = {
+    querySelector(sel) {
+      if (sel === 'textarea[name="q"]') return q;
+      if (sel === 'form[action="/search"]' || sel === 'form[role="search"]' || sel === 'form')
+        return form;
+      return null;
+    },
+    querySelectorAll(sel) {
+      if (/button|input\[type="submit"\]|a\[role="button"\]/.test(sel)) return consentButtons;
+      return [];
+    },
+    body: {
+      get innerText() {
+        if (opts.consent && opts.consent.accepted) return '';
+        if (onCaptcha()) return 'unusual traffic detected';
+        return opts.baseBody || '';
+      },
+    },
+  };
+
+  const computeUrl = () => {
+    if (opts.consent && opts.consent.accepted) return 'https://www.google.com';
+    if (opts.startConsent && !(opts.consent && opts.consent.accepted))
+      return 'https://consent.google.com/intro';
+    if (onCaptcha()) return 'https://www.google.com/sorry/?continue=https://www.google.com/search';
+    return opts.baseUrl || 'https://www.google.com/search?q=x';
+  };
+
+  const page = {
+    url: () => {
+      calls.url.push(computeUrl());
+      return computeUrl();
+    },
+    title: opts.title || (async () => 'Google'),
+    waitForTimeout: opts.waitForTimeout || (async () => {
+      poll += 1; // 推进轮询计数，模拟时间流逝
+    }),
+    async goto(url, o) {
+      calls.goto.push({ url, o });
+    },
+    async waitForSelector(sel, o) {
+      calls.waitForSelector.push({ sel, o });
+      if (sel === '#rso') {
+        // 结果页仅在「非验证码且非同意」时出现
+        const isBlocked =
+          (opts.consent && !opts.consent.accepted && opts.startConsent) || onCaptcha();
+        if (!isBlocked) return {};
+        throw new Error('no #rso yet');
+      }
+      return {};
+    },
+    async evaluate(fn, arg) {
+      const runner = new Function(
+        'document',
+        'window',
+        'Event',
+        'arg',
+        `return (${fn.toString()})(arg);`
+      );
+      const result = runner(document, { HTMLInputElement: { prototype: inputProto } }, FakeEvent, arg);
+      calls.evaluate.push({ fn, arg });
+      calls.kwValue = q._v;
+      calls.kwEvents = q.dispatched.slice();
+      calls.formSubmitted = form.submitted;
+      return result;
+    },
+    async $$(sel) {
+      calls.$$.push(sel);
+      if (sel === '#rso h3 a') return (opts.resultAnchors || []).slice();
+      return [];
+    },
+  };
+
+  return { page, calls, q, form };
+}
+
+/** 构造假结果链接：textContent / getAttribute 均为 async（适配安全读取函数）。 */
+function makeAnchor(title, href) {
+  return {
+    textContent: async () => title,
+    getAttribute: async (n) => (n === 'href' ? href : ''),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test('open(): waits for textarea[name="q"] with state "attached" (not "visible")', async () => {
+  const adapter = new GoogleAdapter();
+  const { page, calls } = makeGooglePage();
+
+  await adapter.open(page);
+
+  assert.strictEqual(calls.goto.length, 1, 'should navigate once');
+  assert.strictEqual(calls.goto[0].url, 'https://www.google.com');
+
+  const boxWaits = calls.waitForSelector.filter((c) => c.sel === 'textarea[name="q"]');
+  assert.strictEqual(boxWaits.length, 1, 'open waits for search box exactly once');
+  assert.strictEqual(boxWaits[0].o.state, 'attached', 'open must use attached, bypassing hidden');
+  assert.notStrictEqual(boxWaits[0].o.state, 'visible', 'open must NOT require visibility');
+});
+
+test('open(): consent page → click 同意 and leave, then wait search box', async () => {
+  const adapter = new GoogleAdapter();
+  const consent = { accepted: false };
+  const acceptBtn = { textContent: 'I agree', getAttribute: () => null, click() { consent.accepted = true; } };
+  const { page } = makeGooglePage({ startConsent: true, consent, consentButtons: [acceptBtn] });
+
+  await adapter.open(page); // 不应抛错
+  assert.strictEqual(consent.accepted, true, 'should have clicked the consent accept button');
+});
+
+test('open(): stuck on consent (no button) → throws ERR_GOOGLE_CONSENT', async () => {
+  const adapter = new GoogleAdapter();
+  const { page } = makeGooglePage({ startConsent: true, consent: { accepted: false } });
+
+  await assert.rejects(
+    () => adapter.open(page),
+    /ERR_GOOGLE_CONSENT/,
+    'open must throw ERR_GOOGLE_CONSENT when consent cannot be passed'
+  );
+});
+
+test('open(): captcha solved after N polls → success', async () => {
+  const adapter = new GoogleAdapter();
+  const { page } = makeGooglePage({ captchaPolls: 2 });
+
+  await adapter.open(page); // 前 2 轮验证码，第 3 轮结果页 → 成功
+  assert.ok(page.url().includes('google.com'), '最终不在 sorry 拦截页');
+});
+
+test('open(): stuck on captcha forever → throws ERR_GOOGLE_CAPTCHA', async () => {
+  const adapter = new GoogleAdapter();
+  const { page } = makeGooglePage({ captchaPolls: Number.MAX_SAFE_INTEGER });
+
+  await assert.rejects(
+    () => adapter.open(page),
+    /ERR_GOOGLE_CAPTCHA/,
+    'open must throw ERR_GOOGLE_CAPTCHA after polling exhausts'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// search()
+// ---------------------------------------------------------------------------
+
+test('search(): step A waits for textarea[name="q"] with state "attached"', async () => {
+  const adapter = new GoogleAdapter();
+  const { page, calls } = makeGooglePage();
+
+  await adapter.search(page, '万年移民');
+
+  const boxWaits = calls.waitForSelector.filter((c) => c.sel === 'textarea[name="q"]');
+  assert.strictEqual(boxWaits.length, 1, 'search waits for search box exactly once (step A)');
+  assert.strictEqual(boxWaits[0].o.state, 'attached', 'step A must use attached');
+});
+
+test('search(): sets keyword via evaluate (no fill), value present', async () => {
+  const adapter = new GoogleAdapter();
+  const { page, calls } = makeGooglePage();
+  const keyword = '万年移民官网';
+
+  await adapter.search(page, keyword);
+
+  assert.strictEqual(calls.kwValue, keyword, 'keyword should be set via evaluate');
+  assert.ok(calls.kwEvents.includes('input'), 'should dispatch input event');
+  assert.ok(calls.kwEvents.includes('change'), 'should dispatch change event');
+});
+
+test('search(): submits via evaluate (requestSubmit), not press/click API', async () => {
+  const adapter = new GoogleAdapter();
+  const { page, calls, form } = makeGooglePage();
+
+  // 假 page 没有 fill/press/click；若适配器回退到这些可见性相关 API 会抛错。
+  await adapter.search(page, '万年移民');
+
+  assert.strictEqual(form.submitted, true, 'should call form.requestSubmit()');
+  const resultWait = calls.waitForSelector.find((c) => c.sel === '#rso');
+  assert.ok(resultWait, 'search should wait for #rso at the end');
+});
+
+test('search(): wraps a failed step A in a step-named error', async () => {
+  const adapter = new GoogleAdapter();
+  const { page } = makeGooglePage();
+  page.waitForSelector = async () => {
+    throw new Error('timeout');
+  };
+
+  await assert.rejects(
+    () => adapter.search(page, 'x'),
+    /等待谷歌搜索框挂载超时/,
+    'should surface a step-named error instead of a raw timeout'
+  );
+});
+
+test('search(): results appear immediately (no captcha) → success', async () => {
+  const adapter = new GoogleAdapter();
+  const { page } = makeGooglePage({ captchaPolls: 0 });
+
+  await adapter.search(page, '万年移民'); // 不应抛错
+  assert.ok(page.url().includes('google.com'), '最终不在 sorry 拦截页');
+});
+
+test('search(): hits captcha, user solves after N polls, then results appear → success', async () => {
+  const adapter = new GoogleAdapter();
+  const { page } = makeGooglePage({ captchaPolls: 2 });
+
+  await adapter.search(page, '万年移民'); // 不应抛错
+  assert.ok(page.url().includes('google.com'), '最终落在结果页');
+});
+
+test('search(): stuck on captcha forever → throws ERR_GOOGLE_CAPTCHA', async () => {
+  const adapter = new GoogleAdapter();
+  const { page } = makeGooglePage({ captchaPolls: Number.MAX_SAFE_INTEGER });
+
+  await assert.rejects(
+    () => adapter.search(page, '万年移民'),
+    /ERR_GOOGLE_CAPTCHA/,
+    'search must throw ERR_GOOGLE_CAPTCHA after polling exhausts'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// locateTarget()
+// ---------------------------------------------------------------------------
+
+test('locateTarget(): uses #rso h3 a (regression: not all <a>)', async () => {
+  const adapter = new GoogleAdapter();
+  const { page, calls } = makeGooglePage({
+    resultAnchors: [makeAnchor('万年移民局官网', 'https://www.manincorp.cn/')],
+  });
+
+  await adapter.locateTarget(page, { domain: 'manincorp.cn', titleKeywords: ['万年移民'] });
+
+  assert.ok(calls.$$.includes('#rso h3 a'), 'must query title links via #rso h3 a');
+  assert.strictEqual(calls.$$.filter((s) => s === '#rso h3 a').length, 1, 'should query title links exactly once');
+});
+
+test('locateTarget(): title + domain double match returns href', async () => {
+  const adapter = new GoogleAdapter();
+  const { page } = makeGooglePage({
+    resultAnchors: [
+      makeAnchor('无关结果', 'https://example.com/'),
+      makeAnchor('万年移民局官网首页', 'https://www.manincorp.cn/'),
+    ],
+  });
+
+  const href = await adapter.locateTarget(page, {
+    domain: 'manincorp.cn',
+    titleKeywords: ['万年移民'],
+  });
+  assert.strictEqual(href, 'https://www.manincorp.cn/', 'should return the double-matched href');
+});
+
+test('locateTarget(): domain-only fallback (title lacks keyword, domain matches)', async () => {
+  const adapter = new GoogleAdapter();
+  // 标题「万年县移民局」不含连续子串「万年移民」（中间有「县」），靠 domain-only 兜底命中
+  const { page } = makeGooglePage({
+    resultAnchors: [makeAnchor('万年县移民局官方网站', 'https://www.manincorp.cn/')],
+  });
+
+  const href = await adapter.locateTarget(page, {
+    domain: 'manincorp.cn',
+    titleKeywords: ['万年移民'],
+  });
+  assert.strictEqual(href, 'https://www.manincorp.cn/', 'should fall back to domain-only match');
+});
+
+test('locateTarget(): no target domain in top 10 → throws diagnostic error', async () => {
+  const adapter = new GoogleAdapter();
+  const { page } = makeGooglePage({
+    resultAnchors: [
+      makeAnchor('其他站点A', 'https://a.example.com/'),
+      makeAnchor('其他站点B', 'https://b.example.com/'),
+    ],
+  });
+
+  await assert.rejects(
+    () => adapter.locateTarget(page, { domain: 'manincorp.cn', titleKeywords: ['万年移民'] }),
+    /目标域名「manincorp.cn」未出现在前 10 条结果中/,
+    'should diagnose missing domain with actionable message'
+  );
+});

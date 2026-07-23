@@ -20,6 +20,17 @@
 
 ---
 
+## [0.3.17] — 2026-07-23
+- **feat(google 适配器完善)：对齐百度适配器的成熟稳健度**
+  - 旧版谷歌适配器是「裸实现」：直接 `fill` 搜索框 + `Enter` + 等 `#rso`，真实环境必踩三类坑且报错笼统。本版全部补齐：
+  - **Google 同意页（consent.google.com）**：新 IP/区域首次访问会被重定向到「Before you continue」同意页（无搜索框无 #rso），旧版傻等超时。现 `open/search` 命中后自动点击「同意/Accept」并等待离开。
+  - **异常流量验证码（google.com/sorry）**：谷歌对自动化极敏感，搜索后常跳「异常流量」拦截页。现命中进入轮询（上限 120s、间隔 2s），提示用户在可见 Chrome 窗口手动过码，过码后自动继续；轮询耗尽抛 `ERR_GOOGLE_CAPTCHA`。
+  - **search 分步 + 明确中文错误 + evaluate 写值绕开可见性**：步骤A 等待搜索框 `attached`；步骤B 用 `page.evaluate` 对 `textarea[name="q"]` 赋原生 value 并派发 input/change（不依赖可见性）；步骤C 用 `page.evaluate` 触发 `form.requestSubmit()`（回退点击搜索按钮）；步骤D 轮询等待 `#rso`，期间识别同意页/验证码并据情处理。
+  - **locateTarget 精准定位 + 复用基类双匹配 + 诊断**：改用 `#rso h3 a` 精准取每条结果的标题主链接（修复旧版遍历结果块内「全部 `<a>`」导致的 sitelink/页脚噪声误匹配）；解析 Google 跳转链接（`/url?q=`/相对路径）为真实落地地址；复用 `PlatformAdapter.matchTarget`（non-strict，启用 domain-only 兜底）；未命中时抛出明确中文诊断（域名未进排名 / 标题未中关键词）。
+  - 新增 `test/googleAdapter.test.js`（16 项，镜像 `test/baiduAdapter.test.js` 的假 page 模式），覆盖同意页/验证码/稳健搜索/精准定位/诊断。全量 262/1skip 通过。
+
+---
+
 ## [0.3.16] — 2026-07-23
 - **fix(数据卫生，O1 回归根治)：单测不再污染生产 `data/`**
   - 根因：上版只清理了假文件，但 `test/wifiPoll.test.js` 多数用例未注入 `statsModule`，
