@@ -186,7 +186,7 @@ async function runPhased(config, emit, deps) {
     const run = statsMod.newRun(config.taskId, {
       platform: 'baidu',
       pollWifi: config.pollWifi,
-      startedAt: config.startedAt,
+      startedAt: new Date().toISOString(),
       keyword: kw0,
       keywords: config.keywords || null,
       clientId: config.clientId,
@@ -198,6 +198,7 @@ async function runPhased(config, emit, deps) {
     });
     finalStatus = worstStatus(finalStatus, st);
 
+    run.endedAt = new Date().toISOString();
     const saved = statsMod.save(run, 'baidu');
     emit(P.makeProgress({
       taskId: config.taskId,
@@ -222,7 +223,7 @@ async function runPhased(config, emit, deps) {
     const run = statsMod.newRun(config.taskId, {
       platform: 'google',
       pollWifi: config.pollWifi,
-      startedAt: config.startedAt,
+      startedAt: new Date().toISOString(),
       keyword: kw0,
       keywords: config.keywords || null,
       clientId: config.clientId,
@@ -242,6 +243,7 @@ async function runPhased(config, emit, deps) {
       statsMod.recordVpn(run, skipVpn);
       statsMod.recordWifi(run, {
         ssid: null, via: 'vpn', status: 'skipped', attempts: 0, retriesUsed: 0,
+        durationMs: 0,
         error: 'VPN 无可用主节点（已剔除超时/不可达），跳过谷歌任务',
       });
       emit(P.makeProgress({
@@ -290,13 +292,17 @@ async function runPhased(config, emit, deps) {
           wifiIndex: i + 1,
           wifiTotal: diag.available.length,
         }));
+        const gT0 = Date.now();
         const st = await eng.run(googleRounds, { vpnPreset: preset });
+        const gT1 = Date.now();
         const recStatus = st === TaskStatus.COMPLETED
           ? 'completed'
           : (st === TaskStatus.FAILED ? 'failed' : st);
         statsMod.recordWifi(run, {
           ssid: node, via: 'vpn', status: recStatus,
           attempts: 1, retriesUsed: 0,
+          startedAt: new Date(gT0).toISOString(), endedAt: new Date(gT1).toISOString(),
+          durationMs: Math.max(0, gT1 - gT0),
           error: st === TaskStatus.COMPLETED ? null : String(st),
         });
         finalStatus = worstStatus(finalStatus, st);
@@ -315,6 +321,7 @@ async function runPhased(config, emit, deps) {
       });
     }
 
+    run.endedAt = new Date().toISOString();
     const saved = statsMod.save(run, 'google');
     emit(P.makeProgress({
       taskId: config.taskId,
@@ -357,6 +364,7 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
         if (!cr.ok) {
           statsMod.recordWifi(run, {
             ssid: ssid, via: 'wifi', status: 'skipped', attempts: 0, retriesUsed: 0,
+            durationMs: 0,
             error: '切换失败：' + cr.message,
           });
           continue;
@@ -380,6 +388,7 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
     let terminal = TaskStatus.FAILED;
     let ok = false;
     let controlBreak = false;
+    const attT0 = Date.now();
     for (let r = 0; r <= MAX_RETRIES; r += 1) {
       attempts += 1;
       const eng = makeEngine(config, emit);
@@ -400,11 +409,14 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
         continue;
       }
     }
+    const attT1 = Date.now();
 
     const recStatus = ok ? 'completed' : (terminal === TaskStatus.FAILED ? 'failed' : terminal);
     statsMod.recordWifi(run, {
       ssid: ssid || null, via: 'wifi', status: recStatus,
       attempts: attempts, retriesUsed: Math.max(0, attempts - 1),
+      startedAt: new Date(attT0).toISOString(), endedAt: new Date(attT1).toISOString(),
+      durationMs: Math.max(0, attT1 - attT0),
       error: ok ? null : (terminal === TaskStatus.FAILED ? '流程连续失败 ' + attempts + ' 次' : terminal),
     });
 
@@ -493,6 +505,7 @@ async function runLegacy(config, emit, deps) {
         if (!cr.ok) {
           statsMod.recordWifi(run, {
             ssid: ssid, status: 'skipped', attempts: 0, retriesUsed: 0,
+            durationMs: 0,
             error: '切换失败：' + cr.message,
           });
           continue;
@@ -516,6 +529,7 @@ async function runLegacy(config, emit, deps) {
     let terminal = TaskStatus.FAILED;
     let ok = false;
     let controlBreak = false;
+    const attT0 = Date.now();
     for (let r = 0; r <= MAX_RETRIES; r += 1) {
       attempts += 1;
       engine = makeEngine(config, engineEmit);
@@ -535,12 +549,15 @@ async function runLegacy(config, emit, deps) {
         continue;
       }
     }
+    const attT1 = Date.now();
 
     statsMod.recordWifi(run, {
       ssid: ssid || null,
       status: ok ? 'completed' : (terminal === TaskStatus.FAILED ? 'failed' : terminal),
       attempts: attempts,
       retriesUsed: Math.max(0, attempts - 1),
+      startedAt: new Date(attT0).toISOString(), endedAt: new Date(attT1).toISOString(),
+      durationMs: Math.max(0, attT1 - attT0),
       error: ok ? null : (terminal === TaskStatus.FAILED ? '流程连续失败 ' + attempts + ' 次（含 ' + MAX_RETRIES + ' 次重试）' : terminal),
     });
 

@@ -4,6 +4,17 @@
 
 ---
 
+## [0.3.21] — 2026-07-24
+- **feat(日志统计)：新增「任务时长」维度（对齐自动化「任务时长统计」诉求）**
+  - `core/taskStats.js`：
+    - `newRun` 增 `endedAt` / `durationMs`（阶段级，百度/谷歌各自一份）；新增 `fmtDur()` 毫秒→可读（`1.2 s` / `3m20s`）。
+    - `recordWifi` 增 `startedAt` / `endedAt` / `durationMs`（节点级，每个 WiFi/VPN 节点本轮流程真实墙钟耗时）。
+    - `summarize` 增 `totalDurationMs`（阶段总耗时）与 `avgNodeDurationMs`（单节点平均耗时）。
+    - `renderMarkdown`：总体统计加「阶段总耗时 / 单节点平均耗时」两行；逐轮明细表新增「耗时」列；顶部补「结束时间 / 总耗时」。
+    - `save` 落盘前补齐 `endedAt`/`durationMs`（worker 已打则沿用），滚动汇总 `task-completion-stats.json` 每条增 `endedAt`/`durationMs`。
+  - `scripts/worker.js`：百度 WiFi 轮询、谷歌 VPN 节点轮询、legacy 分支——在每轮 `eng.run()` 前后打 `Date.now()` 时间戳，按节点写入 `durationMs`；阶段进入时覆写 `run.startedAt` 为阶段起点，`save` 前写入 `run.endedAt`（切失败/skipped 节点 `durationMs:0`）。
+  - 测试：新增 `test/phasedTask.test.js#6` 验证节点 `durationMs≥0`+起止时间戳、阶段 `endedAt` 存在且谷歌晚于百度；全量 274 项（273 通过 / 1 skip）。
+
 ## [0.3.20] — 2026-07-24
 - **feat(分阶段任务流)：百度、谷歌改为「独立阶段 + 独立统计」，谷歌按 VPN 节点轮询**
   - 用户设计：同时勾选百度+谷歌时，百度所有任务先跑完（pollWifi 则按 WiFi 切 N 次），先出【百度统计】；再开 VPN 跑谷歌，谷歌**只用本地网线、不切 WiFi**，按「可用 VPN 节点」轮询，跑完出【谷歌统计】。两份数据独立。

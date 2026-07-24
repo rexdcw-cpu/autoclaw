@@ -287,3 +287,40 @@ test('分阶段：百度记录 via=wifi、谷歌记录 via=vpn', async () => {
   assert.strictEqual(baiduRun.perWifi.length, 2, '百度 2 个 WiFi');
   assert.strictEqual(googleRun.perWifi.length, 1, '谷歌 1 个节点');
 });
+
+// ---------------------------------------------------------------------------
+// 6) 时长统计：每节点带 durationMs / startedAt / endedAt，阶段 run 带 endedAt
+// ---------------------------------------------------------------------------
+test('分阶段：时长统计（每节点 durationMs + 阶段 endedAt）', async () => {
+  const wifi = makeWifi(['A', 'B'], 'A');
+  const ef = makeEngineTracked();
+  const vpn = makeVpn(['N1', 'N2']);
+  const stats = makeFakeStats();
+  const rounds = [
+    { roundIndex: 0, totalRounds: 2, platform: 'baidu', keyword: 'k1' },
+    { roundIndex: 1, totalRounds: 2, platform: 'google', keyword: 'k1' },
+  ];
+  const cfg = buildConfig(['baidu', 'google'], rounds, true, ['A', 'B']);
+
+  await runTask(cfg, () => {}, {
+    wifi, engineFactory: ef.factory, vpn, statsModule: stats, sleep: async () => {},
+  });
+
+  const baiduRun = stats.runs.find((r) => r.platform === 'baidu');
+  const googleRun = stats.runs.find((r) => r.platform === 'google');
+
+  // 阶段级：worker 在 save 前写入 endedAt，startedAt 为阶段开始时间戳
+  assert.ok(typeof baiduRun.startedAt === 'string' && baiduRun.startedAt.length > 0, '百度阶段应有 startedAt');
+  assert.ok(typeof baiduRun.endedAt === 'string' && baiduRun.endedAt.length > 0, '百度阶段应有 endedAt');
+  assert.ok(typeof googleRun.startedAt === 'string' && googleRun.startedAt.length > 0, '谷歌阶段应有 startedAt');
+  assert.ok(typeof googleRun.endedAt === 'string' && googleRun.endedAt.length > 0, '谷歌阶段应有 endedAt');
+  assert.ok(Date.parse(googleRun.endedAt) >= Date.parse(baiduRun.endedAt), '谷歌阶段 endedAt 应晚于百度阶段');
+
+  // 节点级：每条 perWifi 带 durationMs（数字≥0）与起止时间戳
+  [...baiduRun.perWifi, ...googleRun.perWifi].forEach((w) => {
+    assert.strictEqual(typeof w.durationMs, 'number', '节点 durationMs 应为数字');
+    assert.ok(w.durationMs >= 0, '节点 durationMs 应 ≥ 0');
+    assert.ok(typeof w.startedAt === 'string' && w.startedAt.length > 0, '节点应有 startedAt');
+    assert.ok(typeof w.endedAt === 'string' && w.endedAt.length > 0, '节点应有 endedAt');
+  });
+});

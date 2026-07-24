@@ -49,9 +49,22 @@ function newRun(taskId, meta) {
     clientId: meta.clientId || null,
     wifiSource: meta.wifiSource || null, // 'remembered' | 'fallback' | null
     vpn: null, // 谷歌任务前的 VPN 出口状态：{ availableCount, total, usedNode, proxyUrl, skipped }
-    perWifi: [], // { ssid, status:'completed'|'failed'|'skipped', attempts, retriesUsed, error, via:'wifi'|'vpn' }
+    perWifi: [], // { ssid, status:'completed'|'failed'|'skipped', attempts, retriesUsed, error, via:'wifi'|'vpn', startedAt, endedAt, durationMs }
     summary: null,
+    endedAt: null, // 本阶段（百度/谷歌）结束时间
+    durationMs: null, // 本阶段总耗时（毫秒）
   };
+}
+
+/** 毫秒 → 可读时长 */
+function fmtDur(ms) {
+  if (ms == null) return '-';
+  if (ms < 1000) return ms + ' ms';
+  const s = ms / 1000;
+  if (s < 60) return s.toFixed(1) + ' s';
+  const m = Math.floor(s / 60);
+  const rs = Math.round(s % 60);
+  return m + 'm' + (rs ? rs + 's' : '');
 }
 
 /**
@@ -66,8 +79,9 @@ function recordVpn(run, vpn) {
 /**
  * 追加一条单轮（WIFI / VPN 节点）结果记录。
  * @param {object} run newRun() 产物
- * @param {{ssid:?string, status:string, attempts:number, retriesUsed:number, error:?string, via?:string}} rec
+ * @param {{ssid:?string, status:string, attempts:number, retriesUsed:number, error:?string, via?:string, startedAt?:?string, endedAt?:?string, durationMs?:?number}} rec
  *   via: 'wifi'（百度按 WiFi 轮询）| 'vpn'（谷歌按 VPN 节点轮询），缺省 'wifi'
+ *   durationMs: 该 WiFi/VPN 节点本轮流程耗时（毫秒），由 worker 在真实运行处打时间戳
  */
 function recordWifi(run, rec) {
   run.perWifi.push({
@@ -77,6 +91,9 @@ function recordWifi(run, rec) {
     retriesUsed: rec.retriesUsed || 0,
     via: rec.via || 'wifi',
     error: rec.error || null,
+    startedAt: rec.startedAt || null,
+    endedAt: rec.endedAt || null,
+    durationMs: rec.durationMs != null ? rec.durationMs : null,
   });
 }
 
@@ -92,6 +109,9 @@ function summarize(run) {
   const skipped = run.perWifi.filter((w) => w.status === 'skipped').length;
   const totalAttempts = run.perWifi.reduce((s, w) => s + (w.attempts || 0), 0);
   const totalRetries = run.perWifi.reduce((s, w) => s + (w.retriesUsed || 0), 0);
+  const nodeDurations = run.perWifi.map((w) => (w.durationMs != null ? w.durationMs : 0));
+  const sumNodeDur = nodeDurations.reduce((s, d) => s + d, 0);
+  const avgNodeDur = nodeDurations.length ? Math.round(sumNodeDur / nodeDurations.length) : 0;
 
   run.summary = {
     totalWifi: total,
@@ -101,6 +121,8 @@ function summarize(run) {
     completionRate: total ? Math.round((completed / total) * 100) : 0,
     totalFlowAttempts: totalAttempts,
     totalRetries: totalRetries,
+    totalDurationMs: (run.durationMs != null ? run.durationMs : null),
+    avgNodeDurationMs: avgNodeDur,
     overall: failed === 0 && skipped === 0 ? 'completed' : (failed > 0 ? 'failed' : 'partial'),
     vpn: run.vpn || null,
   };
@@ -125,6 +147,8 @@ function renderMarkdown(run) {
   lines.push('- 关键词：' + kw);
   lines.push('- 客户：' + (run.clientId || '(未指定)'));
   lines.push('- 开始时间：' + run.startedAt);
+  lines.push('- 结束时间：' + (run.endedAt || (run.savedAt || '-')));
+  lines.push('- 总耗时：' + fmtDur(run.durationMs != null ? run.durationMs : (run.startedAt && run.savedAt ? (Date.parse(run.savedAt) - Date.parse(run.startedAt)) : null)));
   lines.push('- 保存时间：' + (run.savedAt || new Date().toISOString()));
   lines.push('');
   lines.push('## 总体统计');
@@ -138,6 +162,8 @@ function renderMarkdown(run) {
   lines.push('| 完成率 | ' + s.completionRate + '% |');
   lines.push('| 流程总尝试次数 | ' + s.totalFlowAttempts + ' |');
   lines.push('| 累计重试次数 | ' + s.totalRetries + ' |');
+  lines.push('| 阶段总耗时 | ' + fmtDur(s.totalDurationMs) + ' |');
+  lines.push('| 单节点平均耗时 | ' + fmtDur(s.avgNodeDurationMs) + ' |');
   lines.push('| 整体结论 | ' + s.overall + ' |');
   lines.push('');
 
@@ -162,13 +188,13 @@ function renderMarkdown(run) {
   const detailHeader = run.platform === 'google' ? '## 逐 VPN 节点明细' : '## 逐 WIFI 明细';
   lines.push(detailHeader);
   lines.push('');
-  lines.push('| # | 网络 / VPN 节点 | 终态 | 尝试次数 | 重试次数 | 备注 |');
-  lines.push('| --- | --- | --- | --- | --- | --- |');
+  lines.push('| # | 网络 / VPN 节点 | 终态 | 尝试次数 | 重试次数 | 耗时 | 备注 |');
+  lines.push('| --- | --- | --- | --- | --- | --- | --- |');
   run.perWifi.forEach((w, i) => {
     const name = w.ssid || (w.via === 'vpn' ? '当前节点' : '当前网络');
     const axisTag = w.via === 'vpn' ? '（VPN 节点）' : '';
     const note = w.error ? w.error : (w.status === 'completed' ? (w.retriesUsed > 0 ? ('含 ' + w.retriesUsed + ' 次重试后成功') : '一次成功') : '');
-    lines.push('| ' + (i + 1) + ' | ' + name + axisTag + ' | ' + w.status + ' | ' + w.attempts + ' | ' + w.retriesUsed + ' | ' + note + ' |');
+    lines.push('| ' + (i + 1) + ' | ' + name + axisTag + ' | ' + w.status + ' | ' + w.attempts + ' | ' + w.retriesUsed + ' | ' + fmtDur(w.durationMs) + ' | ' + note + ' |');
   });
   lines.push('');
   return lines.join('\n');
@@ -183,6 +209,13 @@ function renderMarkdown(run) {
 function save(run, fileSuffix) {
   const dir = getDataDir();
   ensureDir(dir);
+  // 阶段结束时间 + 总耗时（worker 若已打 endedAt 则沿用，否则以落盘时刻补齐）
+  // 必须在 summarize 之前算好，summary.totalDurationMs 才能取到值
+  if (!run.endedAt) run.endedAt = new Date().toISOString();
+  if (run.durationMs == null && run.startedAt) {
+    const parsed = Date.parse(run.endedAt) - Date.parse(run.startedAt);
+    run.durationMs = parsed > 0 ? parsed : 0;
+  }
   summarize(run);
   run.savedAt = new Date().toISOString();
 
@@ -207,7 +240,9 @@ function save(run, fileSuffix) {
     taskId: run.taskId,
     platform: run.platform || null,
     startedAt: run.startedAt,
+    endedAt: run.endedAt,
     savedAt: run.savedAt,
+    durationMs: run.durationMs,
     pollWifi: run.pollWifi,
     keyword: run.keyword,
     keywords: run.keywords,
