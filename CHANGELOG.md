@@ -4,6 +4,9 @@
 
 ---
 
+## [0.3.23] — 2026-07-24
+- **fix(vpnLauncher)：纠正「步骤1」的误判逻辑**。autoclaw 的 Chrome 用 `--proxy-server=127.0.0.1:7890` 直连 Mihomo 内核，**不读 Windows 系统代理**，故原"点击系统代理开关"对谷歌无效且误导。改为：① 先 TCP 探 7890 监听，监听即过（内核常驻的常见情况）；② 未监听则 best-effort 拉起 Mihomo Party 主程序（带起内核 sidecar），等 5s 重测；③ 仍不通则发明确告警"请在 Mihomo Party 启动内核"，不再假装"开启 VPN"；④ 原 `vpn_toggle.py` 点击脚本保留为可选（`AUTOCLAW_VPN_CLICK_SYSPROXY=1` 才启用）。worker 步骤文案同步改为"确认 Mihomo 内核/7890 可用"。实测：本机内核运行中，790/9090 监听、密钥鉴权通过、`getAvailableMainNodes` 返回 17 节点/15 可用、走 7890 打 Google 返回 200。
+
 ## [0.3.22] — 2026-07-24
 - **feat(VPN 启动)：谷歌任务新增「步骤1 · 开启VPN」显式步骤**
   - 新增 `scripts/vpn_toggle.py`：用 `uiautomation` 操作桌面 Mihomo Party，点击左上角「系统代理」开启按钮（灰=关→蓝=开）。支持 `--on/--off/--status/--click-only/--debug`；以 TCP 连 `127.0.0.1:7890` 是否监听作为「是否已开」的客观判据；含名称查找 + 坐标兜底 + 调试输出。依赖 `pip install uiautomation`，须在交互桌面会话运行。

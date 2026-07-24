@@ -215,19 +215,19 @@ async function runPhased(config, emit, deps) {
   // 阶段二 · 谷歌（本地网线 + VPN 节点轮询）
   // ---------------------------------------------------------------------
   if (googleRounds.length) {
-    // 步骤1 · 开启 VPN：先在桌面 Mihomo Party 点亮「系统代理」（灰→蓝），
-    // 让 7890 真正监听，谷歌浏览器才能走 VPN 出口。失败仅告警、不阻断任务。
+    // 步骤1 · 确认 Mihomo 内核可用：autoclaw 的 Chrome 直连 127.0.0.1:7890，
+    // 不依赖 Windows 系统代理。故只需确认内核在跑（7890 监听）即可，不可用时尝试拉起。
     emit(P.makeProgress({
       taskId: config.taskId,
       type: EventType.STEP,
-      step: { step: 'vpn_on', status: 'running', detail: '正在打开 Mihomo 系统代理…' },
+      step: { step: 'vpn_on', status: 'running', detail: '正在确认 Mihomo 内核/7890 可用…' },
     }));
     const vpnLaunch = await vpnLauncher.ensureOn({ emit, taskId: config.taskId });
     if (!vpnLaunch.ok) {
       emit(P.makeProgress({
         taskId: config.taskId,
         type: EventType.STEP,
-        step: { step: 'vpn_on', status: 'failed', detail: vpnLaunch.error || 'VPN 系统代理未能开启' },
+        step: { step: 'vpn_on', status: 'failed', detail: vpnLaunch.error || 'Mihomo 内核未启动（7890 未监听）' },
       }));
     }
 
