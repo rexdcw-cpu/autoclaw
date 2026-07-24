@@ -4,6 +4,14 @@
 
 ---
 
+## [0.3.22] — 2026-07-24
+- **feat(VPN 启动)：谷歌任务新增「步骤1 · 开启VPN」显式步骤**
+  - 新增 `scripts/vpn_toggle.py`：用 `uiautomation` 操作桌面 Mihomo Party，点击左上角「系统代理」开启按钮（灰=关→蓝=开）。支持 `--on/--off/--status/--click-only/--debug`；以 TCP 连 `127.0.0.1:7890` 是否监听作为「是否已开」的客观判据；含名称查找 + 坐标兜底 + 调试输出。依赖 `pip install uiautomation`，须在交互桌面会话运行。
+  - 新增 `core/vpnLauncher.js`：`ensureOn()` 经子进程调用上述脚本，永不抛异常；python 缺失/脚本不存在/点击失败/7890 仍不通一律降级为 `{ok:false}` 并 ALERT 提示手动开启，**不阻断**谷歌任务。
+  - `scripts/worker.js`：谷歌阶段最开头插入「步骤1 · 开启VPN」——先发 `STEP(running)`，再 `vpnLauncher.ensureOn()`，成功发 `STEP(success)`、失败发 `STEP(failed)`+`ALERT`。
+  - `public/js/progress.js`：`STEP_LABEL` 增 `vpn_on:'步骤1 · 开启VPN'`，进度页可见该步骤。
+  - 测试：`test/phasedTask.test.js` 6 个用例均注入 `makeFakeVpnLauncher`；断言仅谷歌阶段调用一次、仅百度阶段不调用。全量 274 项（273 通过 / 1 skip）。
+
 ## [0.3.21] — 2026-07-24
 - **feat(日志统计)：新增「任务时长」维度（对齐自动化「任务时长统计」诉求）**
   - `core/taskStats.js`：

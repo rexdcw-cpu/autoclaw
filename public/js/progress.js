@@ -52,6 +52,7 @@
     browse: '浏览',
     human: '拟人',
     close: '关闭',
+    vpn_on: '步骤1 · 开启VPN',
   };
   var STATUS_LABEL = {
     pending: '等待中',

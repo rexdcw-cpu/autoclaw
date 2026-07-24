@@ -142,6 +142,15 @@ function vpnInfoEvents(events) {
   return events.filter((e) => e.type === EventType.VPN_INFO);
 }
 
+// 假 VPN 启动器（步骤1 开启VPN）：记录调用次数，默认返回已开
+function makeFakeVpnLauncher() {
+  const calls = [];
+  return {
+    calls,
+    ensureOn: async () => { calls.push(1); return { ok: true, method: 'fake', error: null }; },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 1) 百度 + 谷歌，pollWifi：百度先按 WiFi 跑，谷歌再按 VPN 节点跑，顺序正确
 // ---------------------------------------------------------------------------
@@ -150,6 +159,7 @@ test('分阶段：百度先全跑、谷歌后全跑（顺序），且百度按 W
   const ef = makeEngineTracked();
   const vpn = makeVpn(['N1', 'N2']);
   const stats = makeFakeStats();
+  const vpnLauncher = makeFakeVpnLauncher();
   const rounds = [
     { roundIndex: 0, totalRounds: 2, platform: 'baidu', keyword: 'k1' },
     { roundIndex: 1, totalRounds: 2, platform: 'google', keyword: 'k1' },
@@ -158,7 +168,7 @@ test('分阶段：百度先全跑、谷歌后全跑（顺序），且百度按 W
 
   const events = [];
   const status = await runTask(cfg, (e) => events.push(e), {
-    wifi, engineFactory: ef.factory, vpn, statsModule: stats, sleep: async () => {},
+    wifi, engineFactory: ef.factory, vpn, statsModule: stats, vpnLauncher, sleep: async () => {},
   });
 
   assert.strictEqual(status, TaskStatus.COMPLETED);
@@ -179,6 +189,8 @@ test('分阶段：百度先全跑、谷歌后全跑（顺序），且百度按 W
   const ts = taskStatsEvents(events);
   assert.strictEqual(ts.length, 2, '应推送两条 TASK_STATS');
   assert.deepStrictEqual(ts.map((e) => e.statsDetail.platform), ['baidu', 'google']);
+  // 步骤1 开启VPN 仅在谷歌阶段触发一次
+  assert.strictEqual(vpnLauncher.calls.length, 1, '谷歌阶段应调用一次 vpnLauncher.ensureOn');
 });
 
 // ---------------------------------------------------------------------------
@@ -189,12 +201,13 @@ test('分阶段：仅百度时不进入谷歌阶段（不调 VPN、无谷歌统�
   const ef = makeEngineTracked();
   const vpn = makeVpn(['N1', 'N2']);
   const stats = makeFakeStats();
+  const vpnLauncher = makeFakeVpnLauncher();
   const rounds = [{ roundIndex: 0, totalRounds: 1, platform: 'baidu', keyword: 'k1' }];
   const cfg = buildConfig(['baidu'], rounds, true, ['A', 'B']);
 
   const events = [];
   const status = await runTask(cfg, (e) => events.push(e), {
-    wifi, engineFactory: ef.factory, vpn, statsModule: stats, sleep: async () => {},
+    wifi, engineFactory: ef.factory, vpn, statsModule: stats, vpnLauncher, sleep: async () => {},
   });
 
   assert.strictEqual(status, TaskStatus.COMPLETED);
@@ -203,6 +216,7 @@ test('分阶段：仅百度时不进入谷歌阶段（不调 VPN、无谷歌统�
   assert.strictEqual(stats.saves.length, 1, '只保存一份百度统计');
   assert.strictEqual(stats.saves[0].platform, 'baidu');
   assert.strictEqual(taskStatsEvents(events).length, 1);
+  assert.strictEqual(vpnLauncher.calls.length, 0, '仅百度时不应调用 vpnLauncher');
 });
 
 // ---------------------------------------------------------------------------
@@ -213,12 +227,13 @@ test('分阶段：仅谷歌时不切 WiFi，直接按 VPN 节点轮询', async (
   const ef = makeEngineTracked();
   const vpn = makeVpn(['N1', 'N2', 'N3']);
   const stats = makeFakeStats();
+  const vpnLauncher = makeFakeVpnLauncher();
   const rounds = [{ roundIndex: 0, totalRounds: 1, platform: 'google', keyword: 'k1' }];
   const cfg = buildConfig(['google'], rounds, false, []);
 
   const events = [];
   const status = await runTask(cfg, (e) => events.push(e), {
-    wifi, engineFactory: ef.factory, vpn, statsModule: stats, sleep: async () => {},
+    wifi, engineFactory: ef.factory, vpn, statsModule: stats, vpnLauncher, sleep: async () => {},
   });
 
   assert.strictEqual(status, TaskStatus.COMPLETED);
@@ -227,6 +242,7 @@ test('分阶段：仅谷歌时不切 WiFi，直接按 VPN 节点轮询', async (
   assert.deepStrictEqual(vpn.selectCalls, ['N1', 'N2', 'N3']);
   assert.strictEqual(stats.saves.length, 1);
   assert.strictEqual(stats.saves[0].platform, 'google');
+  assert.strictEqual(vpnLauncher.calls.length, 1, '谷歌阶段应调用一次 vpnLauncher');
 });
 
 // ---------------------------------------------------------------------------
@@ -237,6 +253,7 @@ test('分阶段：VPN 无可用节点时谷歌跳过（ALERT + VPN_INFO skipped 
   const ef = makeEngineTracked();
   const vpn = makeVpn([]); // 无可用节点
   const stats = makeFakeStats();
+  const vpnLauncher = makeFakeVpnLauncher();
   const rounds = [
     { roundIndex: 0, totalRounds: 2, platform: 'baidu', keyword: 'k1' },
     { roundIndex: 1, totalRounds: 2, platform: 'google', keyword: 'k1' },
@@ -245,7 +262,7 @@ test('分阶段：VPN 无可用节点时谷歌跳过（ALERT + VPN_INFO skipped 
 
   const events = [];
   const status = await runTask(cfg, (e) => events.push(e), {
-    wifi, engineFactory: ef.factory, vpn, statsModule: stats, sleep: async () => {},
+    wifi, engineFactory: ef.factory, vpn, statsModule: stats, vpnLauncher, sleep: async () => {},
   });
 
   assert.strictEqual(status, TaskStatus.COMPLETED);
@@ -270,6 +287,7 @@ test('分阶段：百度记录 via=wifi、谷歌记录 via=vpn', async () => {
   const ef = makeEngineTracked();
   const vpn = makeVpn(['N1']);
   const stats = makeFakeStats();
+  const vpnLauncher = makeFakeVpnLauncher();
   const rounds = [
     { roundIndex: 0, totalRounds: 2, platform: 'baidu', keyword: 'k1' },
     { roundIndex: 1, totalRounds: 2, platform: 'google', keyword: 'k1' },
@@ -277,7 +295,7 @@ test('分阶段：百度记录 via=wifi、谷歌记录 via=vpn', async () => {
   const cfg = buildConfig(['baidu', 'google'], rounds, true, ['A', 'B']);
 
   await runTask(cfg, () => {}, {
-    wifi, engineFactory: ef.factory, vpn, statsModule: stats, sleep: async () => {},
+    wifi, engineFactory: ef.factory, vpn, statsModule: stats, vpnLauncher, sleep: async () => {},
   });
 
   const baiduRun = stats.runs.find((r) => r.platform === 'baidu');
@@ -296,6 +314,7 @@ test('分阶段：时长统计（每节点 durationMs + 阶段 endedAt）', asyn
   const ef = makeEngineTracked();
   const vpn = makeVpn(['N1', 'N2']);
   const stats = makeFakeStats();
+  const vpnLauncher = makeFakeVpnLauncher();
   const rounds = [
     { roundIndex: 0, totalRounds: 2, platform: 'baidu', keyword: 'k1' },
     { roundIndex: 1, totalRounds: 2, platform: 'google', keyword: 'k1' },
@@ -303,7 +322,7 @@ test('分阶段：时长统计（每节点 durationMs + 阶段 endedAt）', asyn
   const cfg = buildConfig(['baidu', 'google'], rounds, true, ['A', 'B']);
 
   await runTask(cfg, () => {}, {
-    wifi, engineFactory: ef.factory, vpn, statsModule: stats, sleep: async () => {},
+    wifi, engineFactory: ef.factory, vpn, statsModule: stats, vpnLauncher, sleep: async () => {},
   });
 
   const baiduRun = stats.runs.find((r) => r.platform === 'baidu');

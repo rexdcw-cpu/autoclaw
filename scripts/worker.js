@@ -122,6 +122,7 @@ async function runTask(config, emit, opts) {
   const wm = opts.wifi || wifi;
   const statsMod = opts.statsModule || taskStats;
   const vpn = opts.vpn || VpnController;
+  const vpnLauncher = opts.vpnLauncher || require('../core/vpnLauncher');
   const makeEngine = opts.engineFactory ||
     ((c, e) => new TaskEngine(c, e, { vpn: opts.vpn || VpnController }));
 
@@ -131,14 +132,14 @@ async function runTask(config, emit, opts) {
   }
 
   // phased：按平台拆分，独立阶段 + 独立统计
-  return runPhased(config, emit, { wm, statsMod, vpn, makeEngine, opts });
+  return runPhased(config, emit, { wm, statsMod, vpn, vpnLauncher, makeEngine, opts });
 }
 
 // ===========================================================================
 // 分阶段流程（v0.3.20）
 // ===========================================================================
 async function runPhased(config, emit, deps) {
-  const { wm, statsMod, vpn, makeEngine, opts } = deps;
+  const { wm, statsMod, vpn, vpnLauncher, makeEngine, opts } = deps;
   const wait = opts.sleep || sleep;
   const retryWait = opts.retrySleep || ((ms) => sleep(ms));
   const MAX_RETRIES = (opts.maxRetries != null)
@@ -214,6 +215,22 @@ async function runPhased(config, emit, deps) {
   // 阶段二 · 谷歌（本地网线 + VPN 节点轮询）
   // ---------------------------------------------------------------------
   if (googleRounds.length) {
+    // 步骤1 · 开启 VPN：先在桌面 Mihomo Party 点亮「系统代理」（灰→蓝），
+    // 让 7890 真正监听，谷歌浏览器才能走 VPN 出口。失败仅告警、不阻断任务。
+    emit(P.makeProgress({
+      taskId: config.taskId,
+      type: EventType.STEP,
+      step: { step: 'vpn_on', status: 'running', detail: '正在打开 Mihomo 系统代理…' },
+    }));
+    const vpnLaunch = await vpnLauncher.ensureOn({ emit, taskId: config.taskId });
+    if (!vpnLaunch.ok) {
+      emit(P.makeProgress({
+        taskId: config.taskId,
+        type: EventType.STEP,
+        step: { step: 'vpn_on', status: 'failed', detail: vpnLaunch.error || 'VPN 系统代理未能开启' },
+      }));
+    }
+
     let diag;
     try {
       diag = await vpn.getAvailableMainNodes();
