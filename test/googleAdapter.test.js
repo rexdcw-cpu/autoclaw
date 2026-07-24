@@ -47,10 +47,17 @@ function makeInputProto() {
  *     （{accepted:false}）与 opts.consentButtons（含「同意」按钮）模拟同意流程。
  *   - captchaPolls: 前 N 次轮询处于验证码页（URL=sorry），之后恢复正常结果页。
  *   - resultAnchors: locateTarget 时 `page.$$('#rso h3 a')` 返回的假链接数组。
+ *   - pages: 多页场景。`[{ anchors, nextHref }, ...]`，pageIndex 从 0 起，
+ *     调 goto 含 `start=` 的 URL 时推进到下一页；默认由 resultAnchors 退化为单页。
  *   - baseUrl/baseBody: 正常（非同意/非验证码）时的 URL/正文。
  */
 function makeGooglePage(opts = {}) {
   const inputProto = makeInputProto();
+  const pages =
+    opts.pages ||
+    (opts.resultAnchors ? [{ anchors: opts.resultAnchors, nextHref: null }] : []);
+  let pageIndex = 0;
+  const curPage = () => pages[pageIndex] || { anchors: [], nextHref: null };
   const FakeEvent = function FakeEvent(type, o) {
     this.type = type;
     this.bubbles = !!(o && o.bubbles);
@@ -96,10 +103,22 @@ function makeGooglePage(opts = {}) {
       if (sel === 'textarea[name="q"]') return q;
       if (sel === 'form[action="/search"]' || sel === 'form[role="search"]' || sel === 'form')
         return form;
+      // 分页：当前页存在下一页链接时返回带 href 的假锚点
+      if (sel === 'a#pnnext') {
+        const np = curPage().nextHref;
+        return np ? { getAttribute: (n) => (n === 'href' ? np : '') } : null;
+      }
       return null;
     },
     querySelectorAll(sel) {
       if (/button|input\[type="submit"\]|a\[role="button"\]/.test(sel)) return consentButtons;
+      // 分页兜底：带 aria-label 下一页/Next 的 start= 链接
+      if (sel.includes('a[href*="start="]')) {
+        const np = curPage().nextHref;
+        return np
+          ? [{ getAttribute: (n) => (n === 'href' ? np : n === 'aria-label' ? 'Next' : ''), textContent: 'Next' }]
+          : [];
+      }
       return [];
     },
     body: {
@@ -130,6 +149,10 @@ function makeGooglePage(opts = {}) {
     }),
     async goto(url, o) {
       calls.goto.push({ url, o });
+      // 翻页：goto 含 start= 的下一页 URL 时推进到下一页
+      if (typeof url === 'string' && /[?&]start=\d+/.test(url) && pageIndex < pages.length - 1) {
+        pageIndex += 1;
+      }
     },
     async waitForSelector(sel, o) {
       calls.waitForSelector.push({ sel, o });
@@ -159,7 +182,7 @@ function makeGooglePage(opts = {}) {
     },
     async $$(sel) {
       calls.$$.push(sel);
-      if (sel === '#rso h3 a') return (opts.resultAnchors || []).slice();
+      if (sel === '#rso h3 a') return (curPage().anchors || []).slice();
       return [];
     },
   };
@@ -371,7 +394,56 @@ test('locateTarget(): no target domain in top 10 → throws diagnostic error', a
 
   await assert.rejects(
     () => adapter.locateTarget(page, { domain: 'manincorp.cn', titleKeywords: ['万年移民'] }),
-    /目标域名「manincorp.cn」未出现在前 10 条结果中/,
+    /目标域名「manincorp.cn」未出现在已扫描的 1 页搜索结果中/,
     'should diagnose missing domain with actionable message'
+  );
+});
+
+test('locateTarget(): scans ALL results on page 1 (target beyond top 10 still matches)', async () => {
+  const adapter = new GoogleAdapter();
+  const anchors = [];
+  for (let i = 0; i < 12; i += 1) {
+    anchors.push(makeAnchor(`无关结果${i}`, `https://x${i}.example.com/`));
+  }
+  anchors.push(makeAnchor('万年移民局官网首页', 'https://www.manincorp.cn/')); // 第 13 条
+
+  const { page, calls } = makeGooglePage({ resultAnchors: anchors });
+
+  const href = await adapter.locateTarget(page, {
+    domain: 'manincorp.cn',
+    titleKeywords: ['万年移民'],
+  });
+  assert.strictEqual(href, 'https://www.manincorp.cn/', 'should match even though target is beyond top 10');
+  // 只查询一次 #rso h3 a（单页场景，无下一页）
+  assert.strictEqual(calls.$$.filter((s) => s === '#rso h3 a').length, 1, 'single page: query once');
+});
+
+test('locateTarget(): target on page 2 found after pagination', async () => {
+  const adapter = new GoogleAdapter();
+  const { page, calls } = makeGooglePage({
+    pages: [
+      {
+        anchors: [
+          makeAnchor('无关站点A', 'https://a.example.com/'),
+          makeAnchor('无关站点B', 'https://b.example.com/'),
+        ],
+        nextHref: '/search?q=x&start=10',
+      },
+      {
+        anchors: [makeAnchor('万年移民局官网首页', 'https://www.manincorp.cn/')],
+        nextHref: null,
+      },
+    ],
+  });
+
+  const href = await adapter.locateTarget(page, {
+    domain: 'manincorp.cn',
+    titleKeywords: ['万年移民'],
+  });
+  assert.strictEqual(href, 'https://www.manincorp.cn/', 'should follow 下一页 and match on page 2');
+  // 翻页至少触发一次 goto 到 start=10
+  assert.ok(
+    calls.goto.some((g) => typeof g.url === 'string' && /[?&]start=\d+/.test(g.url)),
+    'should navigate to next page'
   );
 });

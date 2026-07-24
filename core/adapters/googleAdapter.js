@@ -5,9 +5,10 @@
  * ---------------------------------------------------------------------------
  * 谷歌平台适配器：打开 google.com → 搜索 → 结果页双匹配定位 → 进入目标站。
  *
- * 双匹配（决策 Q3/A1）：结果前 10 条中，标题包含任一 titleKeyword 且
- * 真实落地地址包含 targetDomain 的条目，取首个匹配（non-strict 模式下启用
- * domain-only 兜底，见 PlatformAdapter.matchTarget）。
+ * 双匹配（决策 Q3/A1）：扫描结果页【全部】结果（不再限前 10 条，并触发懒加载
+ * 追加靠后的结果块），标题包含任一 titleKeyword 且真实落地地址包含 targetDomain
+ * 的条目取首个匹配；本页未命中则自动翻「下一页」继续，最多扫描 MAX_RESULT_PAGES
+ * 页。non-strict 模式下启用 domain-only 兜底（见 PlatformAdapter.matchTarget）。
  *
  * ── 与百度适配器对齐的成熟度（本文件相对旧版「裸实现」补全的能力）────────────
  * 旧版谷歌适配器只是「fill 搜索框 + Enter + 等 #rso」，在真实环境下面临三类
@@ -73,6 +74,12 @@ const CAPTCHA_POLL_INTERVAL = 2000;
 
 /** 同意页点击后等待离开的最长时间（毫秒） */
 const CONSENT_LEAVE_MS = 15000;
+
+/**
+ * 定位目标时最多扫描的搜索结果页数（含首页）。目标若排在很靠后，逐页扫描到
+ * 此上限即停，避免无限翻页拖慢任务。
+ */
+const MAX_RESULT_PAGES = 5;
 
 class GoogleAdapter extends PlatformAdapter {
   constructor() {
@@ -358,21 +365,55 @@ class GoogleAdapter extends PlatformAdapter {
     throw new Error('谷歌结果页未加载或验证未通过（ERR_GOOGLE_CAPTCHA）');
   }
 
-  /** 结果页双匹配定位目标站点（精准取标题主链接 + 复用基类 matchTarget + 诊断） */
-  async locateTarget(page, target) {
-    // 二次保险：落在验证码 / 同意页时结果容器不存在，提前抛出明确错误
-    if (await this._isCaptchaPage(page)) {
-      throw new Error(
-        '谷歌验证拦截（ERR_GOOGLE_CAPTCHA）：结果页未加载，请在可见窗口手动通过验证后重试'
-      );
+  /**
+   * 滚到页面底部，触发 Google 的「懒加载更多结果」；包裹 try/catch 容错。
+   * Google 在滚动到底部时会追加本页靠后的结果块（位置 11 及之后），
+   * 这正是「正确页面在页面最低端」却被旧版限制在前 10 条而漏匹配的根因。
+   * @param {import('playwright').Page} page
+   */
+  async _scrollToBottom(page) {
+    try {
+      await page.evaluate(() => {
+        window.scrollTo(0, document.body.scrollHeight);
+      });
+      await page.waitForTimeout(800); // 等待懒加载追加的结果块挂载
+    } catch (e) {
+      /* 滚动失败不致命：沿用已渲染的结果 */
     }
-    if (await this._isConsentPage(page)) {
-      throw new Error('谷歌同意页拦截（ERR_GOOGLE_CONSENT）：结果页未加载，请先通过同意页');
-    }
+  }
 
-    // 精准取每条结果的标题主链接（#rso 内每个 h3 的 a），排除 sitelink / 页脚噪声
+  /**
+   * 在结果页内查找「下一页」链接的真实地址（Google: a#pnnext，回退到带
+   * aria-label 下一页/Next 的 start= 链接）。找不到返回 null。
+   * @param {import('playwright').Page} page
+   * @returns {Promise<string|null>}
+   */
+  async _findNextPageUrl(page) {
+    try {
+      return await page.evaluate(() => {
+        const next = document.querySelector('a#pnnext');
+        if (next && next.getAttribute('href')) return next.getAttribute('href');
+        const links = Array.from(document.querySelectorAll('a[href*="start="]'));
+        const byLabel = links.find((a) =>
+          /next|下一页/i.test(
+            (a.getAttribute('aria-label') || '') + ' ' + (a.textContent || '')
+          )
+        );
+        return byLabel ? byLabel.getAttribute('href') : null;
+      });
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 把结果页标题主链接（#rso h3 a）解析为 {title, href} 列表：
+   * google 跳转链接（/url?q= 或相对路径）解析为真实落地地址；直接 https 链接沿用。
+   * @param {import('playwright').Page} page
+   * @returns {Promise<{title:string,href:string}[]>}
+   */
+  async _parseResultAnchors(page) {
     const anchors = await page.$$(RESULT_TITLE_LINK);
-    const top = anchors.slice(0, 10);
 
     // 安全读取元素属性/文本（部分 mock 元素可能未实现对应方法）
     const safeText = async (el) => {
@@ -388,10 +429,8 @@ class GoogleAdapter extends PlatformAdapter {
       return '';
     };
 
-    // 解析为 {title, href}：google 跳转链接（/url?q= 或相对路径）解析为真实落地地址；
-    // 直接 https 链接沿用，由 matchHref 兜底判定。
     const parsed = [];
-    for (const a of top) {
+    for (const a of anchors) {
       const title = (await safeText(a)).toString();
       const href = (await safeAttr(a, 'href')) || '';
       if (!/^https?:\/\//i.test(href) && !href.startsWith('/')) continue;
@@ -400,30 +439,65 @@ class GoogleAdapter extends PlatformAdapter {
         : await PlatformAdapter.resolveFinalUrl(href, 3000);
       parsed.push({ title, href: realUrl });
     }
+    return parsed;
+  }
 
-    // 调用纯函数做匹配：non-strict 下启用 domain-only 兜底（标题未命中关键词
-    // 但域名命中，典型如站点标题「万年县移民局」vs 关键词「万年移民」）。
-    // 已解析好的真实 URL 直接喂入，resolve 恒等，避免重复网络解析。
-    const match = await PlatformAdapter.matchTarget(parsed, target, {
-      resolve: (h) => h,
-      max: 10,
-      strict: false,
-    });
+  /** 结果页双匹配定位目标站点（扫描本页全部结果 + 翻页；精准取标题主链接 + 复用基类 matchTarget + 诊断） */
+  async locateTarget(page, target) {
+    // 二次保险：落在验证码 / 同意页时结果容器不存在，提前抛出明确错误
+    if (await this._isCaptchaPage(page)) {
+      throw new Error(
+        '谷歌验证拦截（ERR_GOOGLE_CAPTCHA）：结果页未加载，请在可见窗口手动通过验证后重试'
+      );
+    }
+    if (await this._isConsentPage(page)) {
+      throw new Error('谷歌同意页拦截（ERR_GOOGLE_CONSENT）：结果页未加载，请先通过同意页');
+    }
 
-    if (match) return match.href;
+    const allParsed = []; // 跨页累计，仅用于诊断
+    let scannedPages = 0;
+
+    for (let p = 1; p <= MAX_RESULT_PAGES; p += 1) {
+      // 触发懒加载：滚到底，让 Google 追加本页靠后的结果块（位置 11 及之后）
+      await this._scrollToBottom(page);
+
+      // 解析本页【全部】结果标题链接（不再 slice 前 10）
+      const parsed = await this._parseResultAnchors(page);
+      scannedPages += 1;
+      allParsed.push(...parsed);
+
+      // 复用基类 matchTarget：本页全部结果参与双匹配（non-strict 启用 domain-only 兜底）
+      const match = await PlatformAdapter.matchTarget(parsed, target, {
+        resolve: (h) => h,
+        max: parsed.length,
+        strict: false,
+      });
+      if (match) return match.href;
+
+      // 本页未命中 → 找「下一页」继续；无下一页则停止翻页
+      const nextHref = await this._findNextPageUrl(page);
+      if (!nextHref) break;
+      const nextUrl = /^https?:/i.test(nextHref)
+        ? nextHref
+        : new URL(nextHref, page.url()).toString();
+      await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page
+        .waitForSelector('#rso', { state: 'visible', timeout: 15000 })
+        .catch(() => {});
+    }
 
     // ── 诊断：给出可操作的失败原因 ──
-    const anyDomain = parsed.some((it) => PlatformAdapter.matchHref(it.href, target.domain));
+    const anyDomain = allParsed.some((it) => PlatformAdapter.matchHref(it.href, target.domain));
     if (!anyDomain) {
       throw new Error(
-        `[locateTarget] 目标域名「${target.domain}」未出现在前 10 条结果中` +
+        `[locateTarget] 目标域名「${target.domain}」未出现在已扫描的 ${scannedPages} 页搜索结果中` +
           `（可能目标站点未真正进入当前关键词的搜索排名）。建议：更换更精准的搜索关键词、` +
           `或更换/确认目标域名后重试。`
       );
     }
     // 防御性分支：domain-only 兜底已覆盖「域名在但标题未中」的情形，正常不会到达此处。
     throw new Error(
-      `[locateTarget] 前 10 条结果中存在目标域名「${target.domain}」的条目，` +
+      `[locateTarget] 已扫描 ${scannedPages} 页结果中存在目标域名「${target.domain}」的条目，` +
         `但其标题均未命中关键词（${target.titleKeywords.join('、')}）。` +
         `可尝试启用 title-only 兜底或更换更贴合站点标题的关键词。`
     );
