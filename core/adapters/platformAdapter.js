@@ -15,6 +15,29 @@
  * 基类提供：matchTitle / matchHref / resolveFinalUrl / matchTarget（双匹配与重定向解析）。
  */
 
+// -------------------------------------------------------------------------
+// 繁→简归一化（解决「VPN 节点地区导致 Google 结果页用繁体」的匹配失配）
+// -------------------------------------------------------------------------
+// 不同 VPN 节点（如香港 / 台湾）会让 Google 以繁体中文渲染结果标题，而用户
+// 配置的 titleKeywords 通常是简体，导致 matchTitle 的 includes 漏匹配。这里把
+// 标题与关键词都统一归一为简体后再比较，消除地区字型差异。
+// 依赖 opencc-js（纯 JS，无原生构建）。若环境缺失该依赖则优雅降级为原样比较。
+let _cnConverter = null;
+function _getCnConverter() {
+  if (_cnConverter === null) {
+    try {
+      // eslint-disable-next-line global-require
+      const OpenCC = require('opencc-js');
+      const tw = OpenCC.Converter({ from: 'tw', to: 'cn' });
+      const hk = OpenCC.Converter({ from: 'hk', to: 'cn' });
+      _cnConverter = (s) => hk(tw(s)); // 先 TW 后 HK，覆盖两地繁体变体
+    } catch (e) {
+      _cnConverter = (s) => s; // 降级：退回旧行为（不归一）
+    }
+  }
+  return _cnConverter;
+}
+
 /**
  * @abstract
  */
@@ -70,15 +93,32 @@ class PlatformAdapter {
   // -------------------------------------------------------------------------
 
   /**
-   * 标题是否包含任一目标关键词（大小写不敏感，针对中文关键词即包含匹配）。
+   * 把文本归一为简体中文（仅用于匹配，不可逆）。
+   * 繁体（香港/台湾节点下 Google 渲染的标题）会被转为简体，使简体关键词也能命中；
+   * 已是简体的文本保持不变。缺失 opencc-js 依赖时返回原串（优雅降级）。
+   * @param {string} text
+   * @returns {string}
+   */
+  static toSimplified(text) {
+    if (!text) return text;
+    try {
+      return _getCnConverter()(text);
+    } catch (e) {
+      return text;
+    }
+  }
+
+  /**
+   * 标题是否包含任一目标关键词（大小写不敏感；并做繁→简归一，
+   * 兼容 VPN 节点地区差异导致的繁体结果标题）。
    * @param {string} title
    * @param {string[]} titleKeywords
    * @returns {boolean}
    */
   static matchTitle(title, titleKeywords) {
     if (!title || !Array.isArray(titleKeywords)) return false;
-    const t = title.toLowerCase();
-    return titleKeywords.some((kw) => kw && t.includes(kw.toLowerCase()));
+    const t = PlatformAdapter.toSimplified(title).toLowerCase();
+    return titleKeywords.some((kw) => kw && t.includes(PlatformAdapter.toSimplified(kw).toLowerCase()));
   }
 
   /**

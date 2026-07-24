@@ -4,6 +4,22 @@
 
 ---
 
+## [0.3.26] — 2026-07-24
+
+### Fixed
+- **谷歌结果页「繁简字型」匹配失配（VPN 节点地区差异）**：不同 VPN 节点（如香港 /
+  台湾）会让 Google 以**繁体中文**渲染结果标题，而用户配置的 `titleKeywords` 通常是
+  简体，`matchTitle` 的 `includes` 会因字型不同漏匹配，导致 `title+domain` 高置信信号
+  失效（仅能靠 `domain-only` 兜底）。本次修复：
+  - 新增 `PlatformAdapter.toSimplified()`（基于 `opencc-js`，TW/HK 繁体→简体，已简体
+    保持不变）；
+  - `matchTitle` 现在把**标题与关键词都归一为简体**后再比较，繁体标题也能命中简体关键词；
+  - `opencc-js` 缺失时优雅降级为原样比较（不引入硬依赖故障）；
+  - 新增 5 个单测覆盖「繁体标题 × 简体关键词」在 `matchTitle` / `matchTarget`
+    （strict / non-strict）下的命中与优先级。
+
+---
+
 ## [0.3.25] — 2026-07-24
 
 ### Fixed

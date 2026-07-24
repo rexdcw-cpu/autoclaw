@@ -58,6 +58,19 @@ test('matchTitle: case-insensitive', () => {
   assert.strictEqual(PlatformAdapter.matchTitle('BAIDU Example', ['baidu']), true);
 });
 
+test('matchTitle: 繁体标题也能命中简体关键词（VPN 香港/台湾节点兼容）', () => {
+  assert.strictEqual(PlatformAdapter.matchTitle('萬年移民官網', ['万年移民']), true);
+  assert.strictEqual(PlatformAdapter.matchTitle('萬年縣移民局', ['万年县移民局']), true);
+  assert.strictEqual(PlatformAdapter.matchTitle('關於我們', ['关于我们']), true);
+  assert.strictEqual(PlatformAdapter.matchTitle('香港特別行政區政府', ['香港特别行政区政府']), true);
+  // 简体关键词 + 已是简体的标题：归一后保持不变，仍命中
+  assert.strictEqual(PlatformAdapter.matchTitle('万年移民局官网', ['万年移民']), true);
+});
+
+test('matchTitle: 繁体标题不含简体关键词 -> false', () => {
+  assert.strictEqual(PlatformAdapter.matchTitle('臺灣新聞', ['万年移民']), false);
+});
+
 test('matchTitle: empty title or empty keywords -> false', () => {
   assert.strictEqual(PlatformAdapter.matchTitle('', ['万年移民']), false);
   assert.strictEqual(PlatformAdapter.matchTitle('万年移民', []), false);

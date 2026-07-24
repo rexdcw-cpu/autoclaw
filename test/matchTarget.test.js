@@ -40,6 +40,22 @@ test('matchTarget(strict): 标题命中但域名未中 -> null', async () => {
   assert.strictEqual(await PlatformAdapter.matchTarget(items, TARGET, { strict: true }), null);
 });
 
+test('matchTarget(strict): 繁体标题 + 简体关键词 也能双命中（VPN 香港/台湾节点兼容）', async () => {
+  const items = [{ title: '萬年移民官網', href: 'https://www.manincorp.cn/' }];
+  const m = await PlatformAdapter.matchTarget(items, TARGET, { strict: true });
+  assert.deepStrictEqual(m, { href: 'https://www.manincorp.cn/', score: 2, reason: 'title+domain' });
+});
+
+test('matchTarget(non-strict): 繁体标题 + 简体关键词 命中 title+domain 优先于 domain-only', async () => {
+  const items = [
+    { title: '随便站点', href: 'https://www.manincorp.cn/about' }, // domain-only（简体）
+    { title: '萬年移民官網', href: 'https://www.manincorp.cn/' }, // title+domain（繁体）
+  ];
+  const m = await PlatformAdapter.matchTarget(items, TARGET, { strict: false });
+  assert.strictEqual(m.href, 'https://www.manincorp.cn/');
+  assert.strictEqual(m.reason, 'title+domain');
+});
+
 test('matchTarget(strict): 域名命中但标题未中 -> null（strict 不兜底）', async () => {
   const items = [{ title: '万年县移民局官网', href: 'https://www.manincorp.cn/' }];
   assert.strictEqual(await PlatformAdapter.matchTarget(items, TARGET, { strict: true }), null);
