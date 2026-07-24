@@ -276,16 +276,23 @@ async function runPhased(config, emit, deps) {
       }));
       finalStatus = worstStatus(finalStatus, TaskStatus.COMPLETED);
     } else {
+      // 单节点上限（默认轮询全部可用节点）：设 AUTOCLAW_GOOGLE_MAX_NODES=N
+      // 只跑前 N 个节点。用于「把单个流程跑通」时仅验证一个节点、不轮询全部。
+      const nodeCapEnv = Number(process.env.AUTOCLAW_GOOGLE_MAX_NODES) || 0;
+      const nodeCap = nodeCapEnv > 0
+        ? Math.max(1, Math.min(diag.available.length, nodeCapEnv))
+        : diag.available.length;
       emit(P.makeProgress({
         taskId: config.taskId,
         type: EventType.WIFI_POLL,
         message: '【谷歌阶段】VPN 已开启：主节点可用 ' + diag.available.length + '/' + diag.total +
-          ' 个（已剔除超时/不可达），将按节点轮询（本地网线，不切 WiFi）',
+          ' 个（已剔除超时/不可达），将按节点轮询（本地网线，不切 WiFi）' +
+          (nodeCap < diag.available.length ? '（受 AUTOCLAW_GOOGLE_MAX_NODES=' + nodeCap + ' 限制仅跑前 ' + nodeCap + ' 个）' : ''),
         wifiIndex: 0,
-        wifiTotal: diag.available.length,
+        wifiTotal: nodeCap,
       }));
 
-      for (let i = 0; i < diag.available.length; i += 1) {
+      for (let i = 0; i < nodeCap; i += 1) {
         const node = diag.available[i];
         if (abort) { finalStatus = worstStatus(finalStatus, abortStatus); break; }
         try {
@@ -304,10 +311,10 @@ async function runPhased(config, emit, deps) {
         emit(P.makeProgress({
           taskId: config.taskId,
           type: EventType.WIFI_POLL,
-          message: '【谷歌阶段】节点轮询 ' + (i + 1) + '/' + diag.available.length +
+          message: '【谷歌阶段】节点轮询 ' + (i + 1) + '/' + nodeCap +
             '：切至『' + node + '』开始谷歌流程',
           wifiIndex: i + 1,
-          wifiTotal: diag.available.length,
+          wifiTotal: nodeCap,
         }));
         const gT0 = Date.now();
         const st = await eng.run(googleRounds, { vpnPreset: preset });

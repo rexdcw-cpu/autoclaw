@@ -447,3 +447,37 @@ test('locateTarget(): target on page 2 found after pagination', async () => {
     'should navigate to next page'
   );
 });
+
+test('locateTarget(): Google /url?q= wrapper decoded to REAL url (not the wrapper)', async () => {
+  const adapter = new GoogleAdapter();
+  // 真实环境下 Google 有机结果的 href 是跳转包装，包含编码后的真实地址
+  const wrapper =
+    'https://www.google.com/url?q=https%3A%2F%2Fwww.manincorp.cn%2F&sa=U&ved=2ahUKEwi';
+  const { page } = makeGooglePage({
+    resultAnchors: [makeAnchor('万年移民局官网首页', wrapper)],
+  });
+
+  const href = await adapter.locateTarget(page, {
+    domain: 'manincorp.cn',
+    titleKeywords: ['万年移民'],
+  });
+  // 必须返回解码后的真实地址，clickTarget 才能 goto 到真实站点（而非 Google 重定向页）
+  assert.strictEqual(href, 'https://www.manincorp.cn/', 'should decode google /url?q= wrapper to real URL');
+  assert.ok(!href.includes('google.com/url'), 'decoded href must NOT be the google redirect wrapper');
+});
+
+test('locateTarget(): relative /url?q= wrapper decoded to REAL url (domain-only fallback)', async () => {
+  const adapter = new GoogleAdapter();
+  // 相对跳转包装；标题「万年县移民局」不含连续「万年移民」→ 靠 domain-only 兜底，
+  // 但前提是包装被解码成真实域名地址
+  const { page } = makeGooglePage({
+    resultAnchors: [makeAnchor('万年县移民局', '/url?q=https%3A%2F%2Fwww.manincorp.cn%2F')],
+  });
+
+  const href = await adapter.locateTarget(page, {
+    domain: 'manincorp.cn',
+    titleKeywords: ['万年移民'],
+  });
+  assert.strictEqual(href, 'https://www.manincorp.cn/', 'should decode relative google redirect wrapper');
+  assert.ok(!href.includes('google.com/url'), 'decoded relative wrapper must NOT retain google redirect');
+});

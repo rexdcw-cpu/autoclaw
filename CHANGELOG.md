@@ -4,6 +4,27 @@
 
 ---
 
+## [0.3.27] — 2026-07-24
+
+### Fixed
+- **谷歌「点不准目标」（locate 出来的 href 是 Google 跳转包装，clickTarget 落不到真实站）**：
+  旧逻辑对 Google 有机结果的跳转链接 `https://www.google.com/url?q=<编码真实地址>`（或相对
+  `/url?q=...`）依赖 Node 端一次 `HEAD` 网络请求（`resolveFinalUrl`）解析真实地址；该请求在
+  自动化客户端常被 Google 拦截/超时，回退成原始 `/url?q=` 包装链接，再 `goto` 时 Google 会弹
+  「Before you continue」或重定向确认页，最终无法落到真实目标站（即用户反馈的「无法正确点击
+  目标」）。本次改为**直接从 `q` 参数解出真实地址**（`_decodeGoogleRedirect`，零网络、稳定），
+  `resolveFinalUrl` 仅作非 Google 包装链接的最后兜底；`clickTarget` 现在始终 `goto` 真实地址。
+  - 新增 2 个单测（绝对/相对 `/url?q=` 包装均解码为真实地址，且不再保留 google 重定向）。
+- **谷歌阶段支持「单节点」开关（便于把单个流程跑通、不必轮询全部节点）**：新增环境变量
+  `AUTOCLAW_GOOGLE_MAX_NODES=N`，只跑前 N 个可用主节点（默认=全部）。设 `=1` 即只验证首个
+  节点的一条完整谷歌流程（open→search→locate→enter→stay→browse），不轮询其余节点。
+
+### Changed
+- 任务「先停止轮询」：本次接到「最新谷歌任务全失败、先停轮询、把单个流程跑通」反馈，已通过
+  `POST /api/task/stop` 停止卡在 17 节点轮询中的任务 `5ddc2119`，并定位到上述点击 bug 予以修复。
+
+---
+
 ## [0.3.26] — 2026-07-24
 
 ### Fixed

@@ -81,6 +81,39 @@ const CONSENT_LEAVE_MS = 15000;
  */
 const MAX_RESULT_PAGES = 5;
 
+/**
+ * 从 Google 结果跳转链接中直接解出真实落地地址，避免依赖网络往返解析。
+ *
+ * Google 有机结果的主链接通常是跳转包装：
+ *   绝对：https://www.google.com/url?q=<编码后的真实地址>&sa=...&ved=...
+ *   相对：/url?q=<编码后的真实地址>&...
+ * 直接取 `q` 参数并 URL 解码即可得到真实地址（如 https://mzsw.gov.cn/...）。
+ *
+ * 为什么要这样做（而非用 resolveFinalUrl 发 HEAD 请求）：
+ *   - Node 端对 google.com/url?q= 发 HEAD 请求，Google 常对自动化客户端返回
+ *     拦截页 / 不跟随重定向，导致解析失败回退成原始包装链接；
+ *   - 若把包装链接交给 clickTarget 再去 goto，Google 可能弹「Before you continue」
+ *     或重定向确认页，最终无法落到真实目标站（即用户反馈的「无法正确点击目标」）。
+ * 直接解 `q` 参数既能拿到真实地址、又零网络开销、且稳定。
+ *
+ * 解析失败（无 q 参数 / 解出非 http(s)）一律回退原 href，由调用方兜底。
+ * @param {string} href
+ * @returns {string}
+ */
+function _decodeGoogleRedirect(href) {
+  if (!href || typeof href !== 'string') return href;
+  try {
+    const m = href.match(/[?&]q=([^&#]+)/);
+    if (m) {
+      const decoded = decodeURIComponent(m[1]);
+      if (/^https?:\/\//i.test(decoded)) return decoded;
+    }
+  } catch (e) {
+    /* 解码失败回退原 href */
+  }
+  return href;
+}
+
 class GoogleAdapter extends PlatformAdapter {
   constructor() {
     super('google');
@@ -434,9 +467,16 @@ class GoogleAdapter extends PlatformAdapter {
       const title = (await safeText(a)).toString();
       const href = (await safeAttr(a, 'href')) || '';
       if (!/^https?:\/\//i.test(href) && !href.startsWith('/')) continue;
-      const realUrl = /^https?:\/\//i.test(href)
-        ? href
-        : await PlatformAdapter.resolveFinalUrl(href, 3000);
+      // 优先从 Google 跳转链接的 q 参数直接解出真实地址（零网络、稳定）；
+      // 解出的仍是 https 链接则用解码结果，否则回退 resolveFinalUrl（仅对绝对
+      // https 链接生效，相对链接保持原样交给后续 goto 解析）。
+      const decoded = _decodeGoogleRedirect(href);
+      let realUrl = decoded;
+      if (!/^https?:\/\//i.test(decoded)) {
+        realUrl = /^https?:\/\//i.test(href)
+          ? await PlatformAdapter.resolveFinalUrl(href, 3000)
+          : href;
+      }
       parsed.push({ title, href: realUrl });
     }
     return parsed;
