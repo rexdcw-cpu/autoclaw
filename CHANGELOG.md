@@ -4,6 +4,13 @@
 
 ---
 
+## [0.3.19] — 2026-07-24
+- **fix(vpn)：修复谷歌任务「重拉带代理浏览器」崩溃导致整组谷歌失败并误触发熔断**
+  - 根因：`taskEngine.run()` 创建 `BrowserSession` 后未将其挂到 `this.session`，`_relaunch()` 调 `this.session.launch()` 时 `this.session` 为 undefined → 抛 `Cannot read properties of undefined (reading 'launch')`。
+  - 连带 bug：`_googleUnavailable` 标志在首轮探测失败后已置位，但后续谷歌轮次绕过探测、拿「无代理」浏览器直接开 google → `page.goto https://www.google.com/ Timeout 20000ms` 级联失败 → 失败率 40% > 30% 阈值 → 自动熔断。
+  - 修复：① `run()` 内 `this.session = session`；② 谷歌分支开头增加 `if (this._googleUnavailable) return false` 守卫，VPN 不可用时整组谷歌轮次统一 SKIPPED（不计入失败率），杜绝级联误熔断。
+  - 验证：VPN 节点探测本身正常（报错发生在重拉浏览器步骤，证明 `getAvailableMainNodes`/切节点已通）。
+
 ## [0.3.18] — 2026-07-24
 - **feat(vpn)：谷歌任务自动开启 VPN 出口（多选平台流程打通）**
   - 前端放开「谷歌」多选（此前 `display:none` 隐藏）；同时勾选百度+谷歌时，沿用既有的百度→谷歌串行顺序——先跑完百度（本机真实 IP），再切到谷歌时自动开启 VPN。

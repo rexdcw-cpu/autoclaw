@@ -148,6 +148,7 @@ class TaskEngine {
 
   async run() {
     const session = new BrowserSession();
+    this.session = session; // 必须挂到 this，供 _relaunch 重拉浏览器时使用
     let finalStatus = TaskStatus.COMPLETED;
     try {
       const initialProxy = this._initialProxyFor();
@@ -256,6 +257,10 @@ class TaskEngine {
       }
       return true;
     }
+
+    // 已确认 VPN 不可用（上一轮重拉失败）→ 后续所有谷歌轮次直接跳过，
+    // 避免拿无代理浏览器去开 google 级联超时、误触发熔断。
+    if (this._googleUnavailable) return false;
 
     // 谷歌：仅探测一次（同任务内所有谷歌轮次复用结论）
     if (!this._vpnChecked) {
