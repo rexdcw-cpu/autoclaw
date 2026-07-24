@@ -101,6 +101,11 @@ class TaskEngine {
     this._vpnDiag = null; // 最近一次探测结果
     this._vpnNode = null; // 当前选用的主节点
     this._googleUnavailable = false; // VPN 无可用节点 → 谷歌轮次全部跳过
+    // VPN 预设（由 worker 在「按节点轮询」时注入：已选好节点 + 代理地址），
+    // 设置后谷歌阶段直接走该代理、不再内部探测，避免每个节点都重探一遍。
+    this._vpnPreset = (opts && opts.vpnPreset) || null;
+    // 本次运行的轮次（run(roundsOverride) 可传入按平台过滤的轮次）
+    this._rounds = (this.config.rounds || []).slice();
 
     // 统计
     this.successCount = 0;
@@ -123,10 +128,6 @@ class TaskEngine {
   // -------------------------------------------------------------------------
 
   /**
-   * 启动任务主循环。
-   * @returns {Promise<string>} 终态 TaskStatus
-   */
-  /**
    * 计算首轮启动浏览器时使用的代理：
    *   - 若首个平台是 google（即只跑谷歌），直接用 VPN 出口代理启动；
    *   - 否则（百度优先/仅百度）启动时不带代理（百度走本机真实 IP）。
@@ -134,6 +135,10 @@ class TaskEngine {
    * @returns {{httpProxy:string}|null}
    */
   _initialProxyFor() {
+    // 预设了 VPN 节点（谷歌阶段由 worker 逐节点注入）→ 直接走该代理
+    if (this._vpnPreset && this._vpnPreset.proxyUrl) {
+      return { httpProxy: this._vpnPreset.proxyUrl };
+    }
     const firstPlatform = (this.config.platforms && this.config.platforms[0]) || 'baidu';
     if (firstPlatform === 'google') {
       try {
@@ -146,7 +151,22 @@ class TaskEngine {
     return this.config.proxy || null;
   }
 
-  async run() {
+  /**
+   * 启动任务主循环。
+   * @param {Array<object>} [roundsOverride] 按平台过滤后的轮次列表（分阶段执行时传入）；
+   *        缺省使用 this.config.rounds（兼容旧调用）。
+   * @param {{vpnPreset?:object}} [opts] vpnPreset：worker 注入的「已选节点+代理」预设。
+   * @returns {Promise<string>} 终态 TaskStatus
+   */
+  async run(roundsOverride, opts) {
+    opts = opts || {};
+    // 本次运行的轮次（克隆并修正 totalRounds，使进度显示与分阶段一致）
+    const baseRounds = (roundsOverride && roundsOverride.length)
+      ? roundsOverride
+      : (this.config.rounds || []);
+    this._rounds = baseRounds.map((r) => Object.assign({}, r, { totalRounds: baseRounds.length }));
+    this._vpnPreset = opts.vpnPreset || this._vpnPreset || null;
+
     const session = new BrowserSession();
     this.session = session; // 必须挂到 this，供 _relaunch 重拉浏览器时使用
     let finalStatus = TaskStatus.COMPLETED;
@@ -167,7 +187,7 @@ class TaskEngine {
     }
 
     try {
-      for (const plan of this.config.rounds) {
+      for (const plan of this._rounds) {
         // 在轮次边界检查停止/暂停（安全点）
         if (this.shouldStop) {
           finalStatus = TaskStatus.STOPPED;
@@ -261,6 +281,33 @@ class TaskEngine {
     // 已确认 VPN 不可用（上一轮重拉失败）→ 后续所有谷歌轮次直接跳过，
     // 避免拿无代理浏览器去开 google 级联超时、误触发熔断。
     if (this._googleUnavailable) return false;
+
+    // 预设了 VPN 节点（worker 在「按节点轮询」时已选好节点并注入代理）：
+    // 浏览器已由 run() 带该代理启动，这里无需再探测，直接 emit 一次 VPN_INFO 即可。
+    if (this._vpnPreset) {
+      if (!this._vpnChecked) {
+        this._vpnChecked = true;
+        this._vpnNode = this._vpnPreset.node || null;
+        this._usingVpn = true;
+        this.emit(
+          P.makeProgress({
+            taskId: this.config.taskId,
+            type: EventType.VPN_INFO,
+            message:
+              'VPN 已开启（谷歌任务）：已切至节点『' + (this._vpnNode || '（预设）') + '』（按节点轮询）',
+            vpn: {
+              availableCount: this._vpnPreset.availableCount != null ? this._vpnPreset.availableCount : null,
+              total: this._vpnPreset.total != null ? this._vpnPreset.total : null,
+              usedNode: this._vpnPreset.node || null,
+              proxyUrl: this._vpnPreset.proxyUrl || null,
+              availableDetail: this._vpnPreset.availableDetail || null,
+              polledBy: 'node',
+            },
+          }),
+        );
+      }
+      return true;
+    }
 
     // 谷歌：仅探测一次（同任务内所有谷歌轮次复用结论）
     if (!this._vpnChecked) {
@@ -810,7 +857,7 @@ class TaskEngine {
   /** 组装当前统计快照 */
   _makeStats() {
     const done = this.successCount + this.failCount + this.skipCount;
-    const stats = P.makeStats(this.config.rounds.length, done, this.successCount, this.failCount);
+    const stats = P.makeStats(this._rounds.length, done, this.successCount, this.failCount);
     stats.skipCount = this.skipCount;
     return stats;
   }

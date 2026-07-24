@@ -4,6 +4,18 @@
 
 ---
 
+## [0.3.20] — 2026-07-24
+- **feat(分阶段任务流)：百度、谷歌改为「独立阶段 + 独立统计」，谷歌按 VPN 节点轮询**
+  - 用户设计：同时勾选百度+谷歌时，百度所有任务先跑完（pollWifi 则按 WiFi 切 N 次），先出【百度统计】；再开 VPN 跑谷歌，谷歌**只用本地网线、不切 WiFi**，按「可用 VPN 节点」轮询，跑完出【谷歌统计】。两份数据独立。
+  - 实现：`scripts/worker.js` 按 `config.rounds.platform` 拆为百度/谷歌两阶段：
+    - 百度阶段：沿用 WiFi 轮询（切 WiFi+停 5s，不碰 VPN），结束 `taskStats.save(run,'baidu')` + 推一条 `TASK_STATS`；
+    - 谷歌阶段：先 `vpnController.getAvailableMainNodes()`（剔除超时/不可达），无可用节点→ALERT+跳过(skipped)；否则按 `available` 节点循环 `selectNode`+重拉带代理 Chrome 跑 google 轮次（每节点一次），结束 `save(run,'google')`+推 `TASK_STATS`。
+  - `core/taskEngine.js`：`run(roundsOverride, {vpnPreset})` 支持按平台过滤轮次；新增 `vpnPreset`（worker 逐节点注入已选节点+代理），谷歌轮次直接走预设代理、跳过内部再探测；`_makeStats` 改用分阶段轮次数。
+  - `core/taskStats.js`：`newRun` 记 `platform`；`save(run, fileSuffix)` 文件名加 `-baidu/-google` 避免两份统计互盖；`recordWifi` 支持 `via:'wifi'|'vpn'`；Markdown 按平台出标题/逐轮明细表头（WIFI / VPN 节点）；滚动汇总含 `platform`。
+  - **修复 v0.3.18 潜藏 bug**：`core/progressEvent.js` 的 `makeProgress` 此前裁剪了自定义字段，导致 `VPN_INFO.vpn` 与 `TASK_STATS.statsDetail` 永远为空——前端 VPN 状态行与完成度总结明细卡死。本次补齐透传，VPN 状态行与总结卡片恢复渲染。
+  - 向后兼容：无 `config.rounds` 时走 `runLegacy` 分支，行为与 v0.3.19 完全一致（11 个旧单测不受影响）。
+  - 测试：新增 `test/phasedTask.test.js`（5 项，注入式 fake wifi/engine/vpn/stats），覆盖分阶段顺序、百度 WiFi/谷歌 VPN 节点轮询轴、仅百度/仅谷歌、无可用节点跳过、via 标注；全量 272/1skip 通过。
+
 ## [0.3.19] — 2026-07-24
 - **fix(vpn)：修复谷歌任务「重拉带代理浏览器」崩溃导致整组谷歌失败并误触发熔断**
   - 根因：`taskEngine.run()` 创建 `BrowserSession` 后未将其挂到 `this.session`，`_relaunch()` 调 `this.session.launch()` 时 `this.session` 为 undefined → 抛 `Cannot read properties of undefined (reading 'launch')`。

@@ -191,6 +191,10 @@ function makeProgress(o) {
     // 错误透传（worker 异常 / 步骤失败携带，供历史回查）
     error: o.error || undefined,
     errorCode: o.errorCode || undefined,
+    // v0.3.18 VPN 出口状态（VPN_INFO 事件携带：可用主节点数 / 已用节点 / 跳过原因）
+    vpn: o.vpn || undefined,
+    // v0.3.20 分阶段完成度明细（TASK_STATS 事件携带完整 run 对象，供前端弹总结卡片）
+    statsDetail: o.statsDetail || undefined,
     timestamp: now(),
   };
 }

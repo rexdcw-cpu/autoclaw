@@ -41,6 +41,7 @@ function newRun(taskId, meta) {
   meta = meta || {};
   return {
     taskId: taskId,
+    platform: meta.platform || null, // 'baidu' | 'google' | null（分阶段后用于区分两份统计）
     startedAt: meta.startedAt || new Date().toISOString(),
     pollWifi: !!meta.pollWifi,
     keyword: meta.keyword || null,
@@ -48,7 +49,7 @@ function newRun(taskId, meta) {
     clientId: meta.clientId || null,
     wifiSource: meta.wifiSource || null, // 'remembered' | 'fallback' | null
     vpn: null, // 谷歌任务前的 VPN 出口状态：{ availableCount, total, usedNode, proxyUrl, skipped }
-    perWifi: [], // { ssid, status:'completed'|'failed'|'skipped', attempts, retriesUsed, error }
+    perWifi: [], // { ssid, status:'completed'|'failed'|'skipped', attempts, retriesUsed, error, via:'wifi'|'vpn' }
     summary: null,
   };
 }
@@ -63,9 +64,10 @@ function recordVpn(run, vpn) {
 }
 
 /**
- * 追加一条单 WIFI 结果记录。
+ * 追加一条单轮（WIFI / VPN 节点）结果记录。
  * @param {object} run newRun() 产物
- * @param {{ssid:?string, status:string, attempts:number, retriesUsed:number, error:?string}} rec
+ * @param {{ssid:?string, status:string, attempts:number, retriesUsed:number, error:?string, via?:string}} rec
+ *   via: 'wifi'（百度按 WiFi 轮询）| 'vpn'（谷歌按 VPN 节点轮询），缺省 'wifi'
  */
 function recordWifi(run, rec) {
   run.perWifi.push({
@@ -73,6 +75,7 @@ function recordWifi(run, rec) {
     status: rec.status || 'skipped',
     attempts: rec.attempts || 0,
     retriesUsed: rec.retriesUsed || 0,
+    via: rec.via || 'wifi',
     error: rec.error || null,
   });
 }
@@ -108,7 +111,8 @@ function summarize(run) {
 function renderMarkdown(run) {
   const s = run.summary || summarize(run);
   const lines = [];
-  lines.push('# 任务完成度分析 — ' + run.taskId);
+  const platformTag = run.platform ? ('（' + (run.platform === 'google' ? '谷歌' : '百度') + '）') : '';
+  lines.push('# 任务完成度分析' + platformTag + ' — ' + run.taskId);
   lines.push('');
   lines.push('- 任务模式：' + (run.pollWifi
     ? (run.wifiSource === 'fallback'
@@ -155,14 +159,16 @@ function renderMarkdown(run) {
     lines.push('');
   }
 
-  lines.push('## 逐 WIFI 明细');
+  const detailHeader = run.platform === 'google' ? '## 逐 VPN 节点明细' : '## 逐 WIFI 明细';
+  lines.push(detailHeader);
   lines.push('');
-  lines.push('| # | WIFI / 网络 | 终态 | 尝试次数 | 重试次数 | 备注 |');
+  lines.push('| # | 网络 / VPN 节点 | 终态 | 尝试次数 | 重试次数 | 备注 |');
   lines.push('| --- | --- | --- | --- | --- | --- |');
   run.perWifi.forEach((w, i) => {
-    const name = w.ssid || '当前网络';
+    const name = w.ssid || (w.via === 'vpn' ? '当前节点' : '当前网络');
+    const axisTag = w.via === 'vpn' ? '（VPN 节点）' : '';
     const note = w.error ? w.error : (w.status === 'completed' ? (w.retriesUsed > 0 ? ('含 ' + w.retriesUsed + ' 次重试后成功') : '一次成功') : '');
-    lines.push('| ' + (i + 1) + ' | ' + name + ' | ' + w.status + ' | ' + w.attempts + ' | ' + w.retriesUsed + ' | ' + note + ' |');
+    lines.push('| ' + (i + 1) + ' | ' + name + axisTag + ' | ' + w.status + ' | ' + w.attempts + ' | ' + w.retriesUsed + ' | ' + note + ' |');
   });
   lines.push('');
   return lines.join('\n');
@@ -171,16 +177,18 @@ function renderMarkdown(run) {
 /**
  * 持久化统计与分析到磁盘。
  * @param {object} run
+ * @param {string} [fileSuffix] 文件名后缀（分阶段时传 'baidu' / 'google'），避免两份统计互相覆盖
  * @returns {{perFile:string, mdFile:string, rollingFile:string}}
  */
-function save(run) {
+function save(run, fileSuffix) {
   const dir = getDataDir();
   ensureDir(dir);
   summarize(run);
   run.savedAt = new Date().toISOString();
 
-  const perFile = path.join(dir, 'task-stats-' + run.taskId + '.json');
-  const mdFile = path.join(dir, 'task-stats-' + run.taskId + '.md');
+  const suffix = fileSuffix ? '-' + fileSuffix : '';
+  const perFile = path.join(dir, 'task-stats-' + run.taskId + suffix + '.json');
+  const mdFile = path.join(dir, 'task-stats-' + run.taskId + suffix + '.md');
   const rollingFile = path.join(dir, 'task-completion-stats.json');
 
   fs.writeFileSync(perFile, JSON.stringify(run, null, 2), 'utf8');
@@ -197,6 +205,7 @@ function save(run) {
   }
   arr.push({
     taskId: run.taskId,
+    platform: run.platform || null,
     startedAt: run.startedAt,
     savedAt: run.savedAt,
     pollWifi: run.pollWifi,

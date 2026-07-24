@@ -11,31 +11,37 @@
  *   worker → 主进程: { type:'progress', event }         单条进度事件
  *                  { type:'paused'|'stopped'|'done'|'error', event }  终态/状态变化
  *
- * v0.3.11 新增 WIFI 轮询（config.pollWifi=true）：
- *   任务每跑完一次完整流程（engine.run()），自动切换下一个「可用 WIFI」，
- *   停留 5 秒后重跑，直到所有可用 WIFI 都跑过一遍才算任务完成。
- *   可用 WIFI = 本机已保存凭证、可无密码直连的网络（getConnectableNetworks）。
+ * --------------------------------------------------------------------------
+ * 任务流程（v0.3.20 重构，按用户设计）：
  *
- * v0.3.12 变更：
- *   - 失败重试：某个 WIFI 的一次流程熔断（engine.run 返回 FAILED）时，不立即跳过，
- *     而是在「该 WIFI 内」重跑，最多重试 AUTOCLAW_WIFI_FLOW_RETRIES 次（默认 3，
- *     即该 WIFI 最多跑 1+3=4 次）；全部尝试仍失败才标记该 WIFI 失败并跳过。
- *   - 完成度统计：每个 WIFI/网络的尝试次数、重试次数、终态都被记录，任务结束后
- *     汇总成完成度分析并持久化（core/taskStats），并推一条 TASK_STATS 进度事件。
+ *   同时勾选「百度 + 谷歌」时，两个平台为【独立阶段】，各自统计一份数据：
  *
- * v0.3.13 变更（轮询序列来源纠偏）：
- *   - 之前轮询序列取自 Windows 全部已保存配置文件（本机残留的 14 个），
- *     其中 5 个早已不在范围内、切过去必败，白白占轮、拉低完成率。
- *   - 现改为：优先使用面板「已存」集合（config.rememberedWifis，由前端从
- *     localStorage 透传——即你在 WiFi 面板里「记住密码」的网络，如 7 个），
- *     与 Windows 全部历史配置文件解耦；序列只保留当前可见（在范围内）的，
- *     当前已连置顶。未传该集合（直接调 API）时回退到「可见且已存凭证」的 WIFI。
+ *   阶段一 · 百度：
+ *     - 若 pollWifi：按 WiFi 轮询（切换 N 次 WiFi，每次跑一次百度流程）；
+ *       否则只跑当前网络一次。百度走【本机真实 IP / 当前 WiFi】，**不碰 VPN**。
+ *     - 阶段结束 → 生成并保存【百度完成度统计】+ 推送一条 TASK_STATS。
  *
- * 可测试性：轮询主体抽成 runTask(config, emit, opts)，opts 可注入 engineFactory
- * 与 wifi 模块，便于单测在「不切真网 / 不起 Chrome」的情况下验证轮询逻辑。
+ *   阶段二 · 谷歌：
+ *     - 先开 VPN（vpnController.getAvailableMainNodes 探测「主节点」组，
+ *       剔除【超时】/不可达节点），得可用节点列表；
+ *     - 按【VPN 可用节点】轮询（每轮 selectNode 切一个节点 + 重拉带代理 Chrome），
+ *       跑一次谷歌流程；谷歌走【本地网线 + VPN 节点】，**不切 WiFi**。
+ *     - 无可用节点 → ALERT + 跳过谷歌（记录 skipped 统计）。
+ *     - 阶段结束 → 生成并保存【谷歌完成度统计】+ 推送一条 TASK_STATS。
+ *
+ *   两份统计独立（文件名 -baidu / -google），进度页分别弹出「完成度总结」卡片。
+ *
+ * --------------------------------------------------------------------------
+ * 可测试性：runTask(config, emit, opts)，opts 可注入 engineFactory / wifi /
+ * vpn / statsModule / sleep，便于单测在不切真网 / 不起 Chrome / 不碰真 VPN 的情况下
+ * 验证分阶段与节点轮询逻辑。
+ *
+ * 向后兼容：当 config.rounds 缺失时（旧调用 / 旧单测），走 runLegacy 分支，
+ * 行为与 v0.3.19 完全一致（整段 engine.run 包在 WiFi 轮询外层，一份混合统计）。
  */
 
 const { TaskEngine } = require('../core/taskEngine');
+const VpnController = require('../core/vpnController');
 const wifi = require('../core/wifiManager');
 const taskStats = require('../core/taskStats');
 const P = require('../core/progressEvent');
@@ -52,47 +58,382 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** 失败重试前的短暂停顿（毫秒），避免立即重跑把同一故障放大；
- *  可通过 AUTOCLAW_WIFI_RETRY_GAP_MS 覆盖。流程本身耗时，默认 2 秒足矣。 */
+/** 失败重试前的短暂停顿（毫秒）；可通过 AUTOCLAW_WIFI_RETRY_GAP_MS 覆盖 */
 const RETRY_GAP_MS = parseInt(process.env.AUTOCLAW_WIFI_RETRY_GAP_MS, 10) || 2000;
 
+/** 终态优先级：FAILED > STOPPED/PAUSED > COMPLETED */
+function worstStatus(a, b) {
+  const rank = {
+    [TaskStatus.FAILED]: 3,
+    [TaskStatus.STOPPED]: 2,
+    [TaskStatus.PAUSED]: 2,
+    [TaskStatus.COMPLETED]: 1,
+  };
+  return (rank[b] != null ? rank[b] : 1) >= (rank[a] != null ? rank[a] : 1) ? b : a;
+}
+
+// 模块级控制信号（由 IPC control 消息设置，供阶段循环在安全点检查）
 let engine = null;
 let abort = false;
 let abortStatus = TaskStatus.STOPPED;
 
 /**
- * 运行一次任务（含 WIFI 轮询外层循环）。
- * @param {object} config TaskConfig（buildTaskConfig 产物，含 pollWifi）
- * @param {(event:object)=>void} emit 进度事件回调
- * @param {{engineFactory?:Function, wifi?:object, sleep?:Function, statsModule?:object, maxRetries?:number, retrySleep?:Function}} [opts] 测试注入
- *   - engineFactory(c, e)：构造一次 engine.run() 的实例，默认 new TaskEngine
- *   - wifi：WIFI 管理模块，默认本文件顶部的 wifi（真实 netsh 调用）
- *   - sleep(ms)：切换后停留等待，默认 5000ms；单测可注入空函数加速
- *   - statsModule：统计模块，默认 core/taskStats；单测可注入假对象
- *   - maxRetries：每个 WIFI 流程失败后的最大重试次数，默认读 AUTOCLAW_WIFI_FLOW_RETRIES（3）
- *   - retrySleep(ms)：重试前的短暂停顿，默认空（流程本身耗时，无需额外等待）
- * @returns {Promise<string>} 终态 TaskStatus（COMPLETED / FAILED / PAUSED / STOPPED）
+ * 构建 WIFI 轮询序列（仅 pollWifi）：优先面板「已存」集合，回退可见且本机已存凭证。
+ * 返回 { seq, usedRemembered, sourceDesc }。
  */
+async function buildWifiSeq(config, wm) {
+  const current = await wm.getCurrentSsid();
+  let source;
+  let usedRemembered = false;
+  if (Array.isArray(config.rememberedWifis) && config.rememberedWifis.length) {
+    source = config.rememberedWifis.slice();
+    usedRemembered = true;
+  } else {
+    source = await wm.getConnectableNetworks();
+  }
+  const visible = await wm.listNetworks();
+  const visibleSet = new Set(visible.map((n) => n.ssid));
+  const beforeLen = source.length;
+  let pool = source.filter((s) => visibleSet.has(s));
+  const excludedNotVisible = beforeLen - pool.length;
+  if (pool.length === 0) pool = source.slice();
+  if (current && !pool.includes(current) && visibleSet.has(current)) {
+    pool.unshift(current);
+  }
+  if (current && pool.includes(current)) {
+    const ci = pool.indexOf(current);
+    if (ci > 0) {
+      const [c] = pool.splice(ci, 1);
+      pool.unshift(c);
+    }
+  }
+  const sourceDesc = usedRemembered
+    ? ('面板『已存』集合遍历 ' + pool.length + ' 个 WIFI（共 ' + beforeLen + ' 个已存' +
+      (excludedNotVisible ? '，已剔除不可见 ' + excludedNotVisible + ' 个' : '') + '）')
+    : ('兜底遍历 ' + pool.length + ' 个 WIFI（可见且本机已存凭证，未收到面板已存集合）');
+  return { seq: pool, usedRemembered, sourceDesc };
+}
+
+// ===========================================================================
+// 入口分流
+// ===========================================================================
 async function runTask(config, emit, opts) {
   opts = opts || {};
-  const makeEngine = opts.engineFactory || ((c, e) => new TaskEngine(c, e));
   const wm = opts.wifi || wifi;
-  const wait = opts.sleep || sleep;
   const statsMod = opts.statsModule || taskStats;
+  const vpn = opts.vpn || VpnController;
+  const makeEngine = opts.engineFactory ||
+    ((c, e) => new TaskEngine(c, e, { vpn: opts.vpn || VpnController }));
+
+  // legacy：无 rounds（旧调用 / 旧单测）→ 完全沿用 v0.3.19 行为
+  if (!Array.isArray(config.rounds) || config.rounds.length === 0) {
+    return runLegacy(config, emit, { wm, statsMod, vpn, makeEngine, opts });
+  }
+
+  // phased：按平台拆分，独立阶段 + 独立统计
+  return runPhased(config, emit, { wm, statsMod, vpn, makeEngine, opts });
+}
+
+// ===========================================================================
+// 分阶段流程（v0.3.20）
+// ===========================================================================
+async function runPhased(config, emit, deps) {
+  const { wm, statsMod, vpn, makeEngine, opts } = deps;
+  const wait = opts.sleep || sleep;
   const retryWait = opts.retrySleep || ((ms) => sleep(ms));
   const MAX_RETRIES = (opts.maxRetries != null)
     ? opts.maxRetries
     : (parseInt(process.env.AUTOCLAW_WIFI_FLOW_RETRIES, 10) || 3);
 
-  // 轮询模式下，子进程 engine.run() 每跑完一个 WIFI 的完整流程会 emit 一次 TASK_END
-  // （"任务结束"）。若原样推给前端，进度页会在一个轮询任务里出现多次"■ 任务结束"，
-  // 看起来像任务中途断了。这里把它改写为一条普通的 wifi_poll「子流程结束」提示
-  // （保留 stats 供实时失败率），真正的终态框只由 worker 末尾的 TASK_END 渲染。
-  const engineEmit = (ev) => {
-    // 捕获 VPN 状态事件，落到完成度汇总（谷歌任务前记录可用节点数 / 选用节点）
-    if (ev && ev.type === EventType.VPN_INFO && ev.vpn) {
-      statsMod.recordVpn(run, ev.vpn);
+  const baiduRounds = config.rounds.filter((r) => r.platform === 'baidu');
+  const googleRounds = config.rounds.filter((r) => r.platform === 'google');
+  const kw0 = (config.keywords && config.keywords.length === 1) ? config.keywords[0] : null;
+
+  let currentRun = null;
+  const phasedEmit = (ev) => {
+    if (ev && ev.type === EventType.VPN_INFO && ev.vpn) statsMod.recordVpn(currentRun, ev.vpn);
+    if (ev && ev.type === EventType.TASK_END) return; // 终态由 worker 在末尾统一发
+    emit(ev);
+  };
+
+  abort = false;
+  abortStatus = TaskStatus.STOPPED;
+  let finalStatus = TaskStatus.COMPLETED;
+
+  // ---------------------------------------------------------------------
+  // 阶段一 · 百度（WiFi 轮询，不碰 VPN）
+  // ---------------------------------------------------------------------
+  if (baiduRounds.length) {
+    const wifiSeq = config.pollWifi ? await buildWifiSeq(config, wm) : null;
+    const seq = wifiSeq ? wifiSeq.seq : [null];
+    if (wifiSeq) {
+      emit(P.makeProgress({
+        taskId: config.taskId,
+        type: EventType.WIFI_POLL,
+        message: '【百度阶段】WIFI 轮询已启用：按' + wifiSeq.sourceDesc +
+          '，从『' + (seq[0] || '当前网络') + '』开始',
+        wifiIndex: 0,
+        wifiTotal: seq.length,
+      }));
+    } else {
+      emit(P.makeProgress({
+        taskId: config.taskId,
+        type: EventType.WIFI_POLL,
+        message: '【百度阶段】单网络模式（仅当前网络一次，不走 VPN）',
+      }));
     }
+
+    const run = statsMod.newRun(config.taskId, {
+      platform: 'baidu',
+      pollWifi: config.pollWifi,
+      startedAt: config.startedAt,
+      keyword: kw0,
+      keywords: config.keywords || null,
+      clientId: config.clientId,
+      wifiSource: config.pollWifi ? (wifiSeq && wifiSeq.usedRemembered ? 'remembered' : 'fallback') : null,
+    });
+    currentRun = run;
+    const st = await runBaiduLoop(config, baiduRounds, seq, {
+      wm, makeEngine, wait, retryWait, MAX_RETRIES, emit: phasedEmit, run, statsMod,
+    });
+    finalStatus = worstStatus(finalStatus, st);
+
+    const saved = statsMod.save(run, 'baidu');
+    emit(P.makeProgress({
+      taskId: config.taskId,
+      type: EventType.TASK_STATS,
+      message: '【百度】完成度统计已生成（' + run.summary.completedWifi + '/' + run.summary.totalWifi +
+        ' 完成，' + run.summary.totalRetries + ' 次重试）—— ' + saved.mdFile,
+      stats: run.summary,
+      statsDetail: run,
+    }));
+  }
+
+  // ---------------------------------------------------------------------
+  // 阶段二 · 谷歌（本地网线 + VPN 节点轮询）
+  // ---------------------------------------------------------------------
+  if (googleRounds.length) {
+    let diag;
+    try {
+      diag = await vpn.getAvailableMainNodes();
+    } catch (e) {
+      diag = { available: [], error: e.message };
+    }
+    const run = statsMod.newRun(config.taskId, {
+      platform: 'google',
+      pollWifi: config.pollWifi,
+      startedAt: config.startedAt,
+      keyword: kw0,
+      keywords: config.keywords || null,
+      clientId: config.clientId,
+      wifiSource: null,
+    });
+    currentRun = run;
+
+    if (!diag || !diag.available || diag.available.length === 0) {
+      // 无可用节点：跳过谷歌（记录 skipped，不计入失败率）
+      const skipVpn = {
+        availableCount: 0,
+        total: diag ? diag.total : 0,
+        skipped: true,
+        proxyUrl: diag ? diag.proxyUrl : null,
+        error: diag ? diag.error : '无可用节点',
+      };
+      statsMod.recordVpn(run, skipVpn);
+      statsMod.recordWifi(run, {
+        ssid: null, via: 'vpn', status: 'skipped', attempts: 0, retriesUsed: 0,
+        error: 'VPN 无可用主节点（已剔除超时/不可达），跳过谷歌任务',
+      });
+      emit(P.makeProgress({
+        taskId: config.taskId,
+        type: EventType.ALERT,
+        message: 'VPN 无可用主节点（已剔除超时/不可达），跳过谷歌任务：' + (diag && diag.error ? diag.error : '无可用节点'),
+      }));
+      emit(P.makeProgress({
+        taskId: config.taskId,
+        type: EventType.VPN_INFO,
+        message: 'VPN 无可用主节点，谷歌任务跳过',
+        vpn: skipVpn,
+      }));
+      finalStatus = worstStatus(finalStatus, TaskStatus.COMPLETED);
+    } else {
+      emit(P.makeProgress({
+        taskId: config.taskId,
+        type: EventType.WIFI_POLL,
+        message: '【谷歌阶段】VPN 已开启：主节点可用 ' + diag.available.length + '/' + diag.total +
+          ' 个（已剔除超时/不可达），将按节点轮询（本地网线，不切 WiFi）',
+        wifiIndex: 0,
+        wifiTotal: diag.available.length,
+      }));
+
+      for (let i = 0; i < diag.available.length; i += 1) {
+        const node = diag.available[i];
+        if (abort) { finalStatus = worstStatus(finalStatus, abortStatus); break; }
+        try {
+          await vpn.selectNode(node);
+        } catch (e) { /* 切节点失败不阻断，沿用 */ }
+
+        const preset = {
+          node: node,
+          availableCount: diag.available.length,
+          total: diag.total,
+          proxyUrl: diag.proxyUrl,
+          availableDetail: diag.availableDetail || null,
+        };
+        const eng = makeEngine(config, phasedEmit);
+        engine = eng;
+        emit(P.makeProgress({
+          taskId: config.taskId,
+          type: EventType.WIFI_POLL,
+          message: '【谷歌阶段】节点轮询 ' + (i + 1) + '/' + diag.available.length +
+            '：切至『' + node + '』开始谷歌流程',
+          wifiIndex: i + 1,
+          wifiTotal: diag.available.length,
+        }));
+        const st = await eng.run(googleRounds, { vpnPreset: preset });
+        const recStatus = st === TaskStatus.COMPLETED
+          ? 'completed'
+          : (st === TaskStatus.FAILED ? 'failed' : st);
+        statsMod.recordWifi(run, {
+          ssid: node, via: 'vpn', status: recStatus,
+          attempts: 1, retriesUsed: 0,
+          error: st === TaskStatus.COMPLETED ? null : String(st),
+        });
+        finalStatus = worstStatus(finalStatus, st);
+        if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) {
+          finalStatus = st;
+          break;
+        }
+      }
+      statsMod.recordVpn(run, {
+        availableCount: diag.available.length,
+        total: diag.total,
+        usedNode: diag.available[0],
+        proxyUrl: diag.proxyUrl,
+        availableDetail: diag.availableDetail || null,
+        polledBy: 'node',
+      });
+    }
+
+    const saved = statsMod.save(run, 'google');
+    emit(P.makeProgress({
+      taskId: config.taskId,
+      type: EventType.TASK_STATS,
+      message: '【谷歌】完成度统计已生成（' + run.summary.completedWifi + '/' + run.summary.totalWifi +
+        ' 完成，' + run.summary.totalRetries + ' 次重试）—— ' + saved.mdFile,
+      stats: run.summary,
+      statsDetail: run,
+    }));
+  }
+
+  emit(P.makeProgress({
+    taskId: config.taskId,
+    type: EventType.TASK_END,
+    status: finalStatus,
+    message: 'worker 结束（分阶段：百度→谷歌）',
+  }));
+  return finalStatus;
+}
+
+/** 百度阶段：按 WiFi 序列循环跑百度流程（含单 WiFi 内失败重试） */
+async function runBaiduLoop(config, baiduRounds, seq, deps) {
+  const { wm, makeEngine, wait, retryWait, MAX_RETRIES, emit, run, statsMod } = deps;
+  let finalStatus = TaskStatus.COMPLETED;
+
+  for (let i = 0; i < seq.length; i += 1) {
+    const ssid = seq[i];
+    if (abort) { finalStatus = abortStatus; break; }
+    if (i > 0 || (i === 0 && ssid && (await wm.getCurrentSsid()) !== ssid)) {
+      if (ssid) {
+        const cr = await wm.connectSaved(ssid);
+        emit(P.makeProgress({
+          taskId: config.taskId,
+          type: EventType.WIFI_POLL,
+          message: (cr.ok ? '已切换至『' + ssid + '』' : '切换『' + ssid + '』失败：' + cr.message) + '，停留 5 秒',
+          wifiIndex: i + 1,
+          wifiTotal: seq.length,
+          ssid: ssid,
+        }));
+        if (!cr.ok) {
+          statsMod.recordWifi(run, {
+            ssid: ssid, via: 'wifi', status: 'skipped', attempts: 0, retriesUsed: 0,
+            error: '切换失败：' + cr.message,
+          });
+          continue;
+        }
+        await wait(5000);
+      }
+    }
+
+    if (config.pollWifi) {
+      emit(P.makeProgress({
+        taskId: config.taskId,
+        type: EventType.WIFI_POLL,
+        message: '【百度阶段】WIFI 轮询 ' + (i + 1) + '/' + seq.length + '：使用『' + (ssid || '当前网络') + '』开始百度流程',
+        wifiIndex: i + 1,
+        wifiTotal: seq.length,
+        ssid: ssid || '',
+      }));
+    }
+
+    let attempts = 0;
+    let terminal = TaskStatus.FAILED;
+    let ok = false;
+    let controlBreak = false;
+    for (let r = 0; r <= MAX_RETRIES; r += 1) {
+      attempts += 1;
+      const eng = makeEngine(config, emit);
+      engine = eng;
+      const st = await eng.run(baiduRounds);
+      if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) {
+        terminal = st; controlBreak = true; break;
+      }
+      if (st === TaskStatus.COMPLETED) { terminal = st; ok = true; break; }
+      terminal = TaskStatus.FAILED;
+      if (r < MAX_RETRIES) {
+        emit(P.makeProgress({
+          taskId: config.taskId, type: EventType.WIFI_POLL,
+          message: '『' + (ssid || '当前网络') + '』第 ' + attempts + ' 次流程失败（' + (r + 1) + '/' + MAX_RETRIES + ' 重试），即将重跑',
+          wifiIndex: i + 1, wifiTotal: seq.length, ssid: ssid || '',
+        }));
+        await retryWait(RETRY_GAP_MS);
+        continue;
+      }
+    }
+
+    const recStatus = ok ? 'completed' : (terminal === TaskStatus.FAILED ? 'failed' : terminal);
+    statsMod.recordWifi(run, {
+      ssid: ssid || null, via: 'wifi', status: recStatus,
+      attempts: attempts, retriesUsed: Math.max(0, attempts - 1),
+      error: ok ? null : (terminal === TaskStatus.FAILED ? '流程连续失败 ' + attempts + ' 次' : terminal),
+    });
+
+    if (controlBreak) { finalStatus = terminal; break; }
+    if (!ok && terminal === TaskStatus.FAILED) {
+      finalStatus = TaskStatus.FAILED;
+      emit(P.makeProgress({
+        taskId: config.taskId, type: EventType.WIFI_POLL,
+        message: '『' + (ssid || '当前网络') + '』流程连续失败，跳过该 WIFI 并继续下一个',
+        wifiIndex: i + 1, wifiTotal: seq.length, ssid: ssid || '',
+      }));
+    }
+  }
+  return finalStatus;
+}
+
+// ===========================================================================
+// Legacy 流程（无 config.rounds 时，行为与 v0.3.19 完全一致）
+// ===========================================================================
+async function runLegacy(config, emit, deps) {
+  const { wm, statsMod, vpn, makeEngine, opts } = deps;
+  const wait = opts.sleep || sleep;
+  const retryWait = opts.retrySleep || ((ms) => sleep(ms));
+  const MAX_RETRIES = (opts.maxRetries != null)
+    ? opts.maxRetries
+    : (parseInt(process.env.AUTOCLAW_WIFI_FLOW_RETRIES, 10) || 3);
+
+  const engineEmit = (ev) => {
+    if (ev && ev.type === EventType.VPN_INFO && ev.vpn) statsMod.recordVpn(run, ev.vpn);
     if (config.pollWifi && ev && ev.type === EventType.TASK_END) {
       emit(P.makeProgress({
         taskId: config.taskId,
@@ -113,57 +454,19 @@ async function runTask(config, emit, opts) {
   let seq = null;
   let usedRemembered = false;
   if (config.pollWifi) {
-    const current = await wm.getCurrentSsid();
-    // 优先使用面板「已存」集合（前端从 localStorage 透传的 rememberedWifis），
-    // 即你在 WiFi 面板里「记住密码」的网络（如当前的 7 个），与 Windows 全部
-    // 历史已保存配置文件解耦——避免把早就搬走/信号外、却仍残留在本机的网络也轮询进来空跑。
-    let source;
-    if (Array.isArray(config.rememberedWifis) && config.rememberedWifis.length) {
-      // 优先：面板「已存」集合（前端从 localStorage 透传），与 Windows 历史配置解耦
-      source = config.rememberedWifis.slice();
-      usedRemembered = true;
-    } else {
-      // 兜底：未显式传已存集合（如提交时面板没有已存 WiFi、或非面板入口）时，
-      // 回退到「可见且本机已存凭证」的 WIFI（getConnectableNetworks）。
-      source = await wm.getConnectableNetworks();
-    }
-    // 仅保留当前可见（在范围内）的，避免切连不存在的网络白白占一轮；
-    // 全部不可见（极端情况）则回退到 source 本身，交由 connectSaved 跳过失败项。
-    const visible = await wm.listNetworks();
-    const visibleSet = new Set(visible.map((n) => n.ssid));
-    const beforeLen = source.length;
-    let pool = source.filter((s) => visibleSet.has(s));
-    const excludedNotVisible = beforeLen - pool.length;
-    if (pool.length === 0) pool = source.slice();
-    // 当前已连且可见但不在 source 内时，仍置顶（绝不跳过正在使用的网络）
-    if (current && !pool.includes(current) && visibleSet.has(current)) {
-      pool.unshift(current);
-    }
-    // 当前已连置顶作为轮询起点
-    if (current && pool.includes(current)) {
-      const ci = pool.indexOf(current);
-      if (ci > 0) {
-        const [c] = pool.splice(ci, 1);
-        pool.unshift(c);
-      }
-    }
-    seq = pool;
-    // 诚实说明序列来源：面板已存 vs 兜底，避免把「兜底全部可见网络」伪装成「已存」
-    const sourceDesc = usedRemembered
-      ? ('面板『已存』集合遍历 ' + seq.length + ' 个 WIFI（共 ' + beforeLen + ' 个已存' +
-        (excludedNotVisible ? '，已剔除不可见 ' + excludedNotVisible + ' 个' : '') + '）')
-      : ('兜底遍历 ' + seq.length + ' 个 WIFI（可见且本机已存凭证，未收到面板已存集合）');
+    const built = await buildWifiSeq(config, wm);
+    seq = built.seq;
+    usedRemembered = built.usedRemembered;
     emit(P.makeProgress({
       taskId: config.taskId,
       type: EventType.WIFI_POLL,
-      message: 'WIFI 轮询已启用：按' + sourceDesc + '，从『' + (seq[0] || current || '当前网络') + '』开始，单个 WIFI 流程失败将重试 ' + MAX_RETRIES + ' 次',
+      message: 'WIFI 轮询已启用：按' + built.sourceDesc + '，从『' + (seq[0] || '当前网络') + '』开始，单个 WIFI 流程失败将重试 ' + MAX_RETRIES + ' 次',
       wifiIndex: 0,
       wifiTotal: seq.length,
     }));
   }
 
-  // ---- 轮询外层：每个 WIFI 跑一次（失败的在该 WIFI 内重试）完整流程 ----
-  const order = seq || [null]; // 非轮询：只跑当前网络一次
+  const order = seq || [null];
   const run = statsMod.newRun(config.taskId, {
     pollWifi: config.pollWifi,
     startedAt: config.startedAt,
@@ -175,8 +478,6 @@ async function runTask(config, emit, opts) {
 
   for (let i = 0; i < order.length; i += 1) {
     const ssid = order[i];
-
-    // 第 0 个用当前已连（不切）；其余（及首个非当前）先切换
     if (i > 0 || (i === 0 && ssid && (await wm.getCurrentSsid()) !== ssid)) {
       if (abort) { finalStatus = abortStatus; break; }
       if (ssid) {
@@ -191,15 +492,12 @@ async function runTask(config, emit, opts) {
         }));
         if (!cr.ok) {
           statsMod.recordWifi(run, {
-            ssid: ssid,
-            status: 'skipped',
-            attempts: 0,
-            retriesUsed: 0,
+            ssid: ssid, status: 'skipped', attempts: 0, retriesUsed: 0,
             error: '切换失败：' + cr.message,
           });
-          continue; // 跳过该 WIFI，尝试下一个
+          continue;
         }
-        await wait(5000); // 停留 5 秒
+        await wait(5000);
       }
     }
 
@@ -214,7 +512,6 @@ async function runTask(config, emit, opts) {
       }));
     }
 
-    // ---- 流程运行 + 失败重试（仅在该 WIFI 内）----
     let attempts = 0;
     let terminal = TaskStatus.FAILED;
     let ok = false;
@@ -223,65 +520,43 @@ async function runTask(config, emit, opts) {
       attempts += 1;
       engine = makeEngine(config, engineEmit);
       const st = await engine.run();
-
       if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) {
-        terminal = st;
-        controlBreak = true;
-        break; // 受控中断，不再重试
+        terminal = st; controlBreak = true; break;
       }
-      if (st === TaskStatus.COMPLETED) {
-        terminal = st;
-        ok = true;
-        break;
-      }
-      // FAILED：重试（除非已是最后一次尝试）
+      if (st === TaskStatus.COMPLETED) { terminal = st; ok = true; break; }
       terminal = TaskStatus.FAILED;
       if (r < MAX_RETRIES) {
         emit(P.makeProgress({
-          taskId: config.taskId,
-          type: EventType.WIFI_POLL,
+          taskId: config.taskId, type: EventType.WIFI_POLL,
           message: '『' + (ssid || '当前网络') + '』第 ' + attempts + ' 次流程失败（' + (r + 1) + '/' + MAX_RETRIES + ' 重试），即将重跑该 WIFI 流程',
-          wifiIndex: i + 1,
-          wifiTotal: order.length,
-          ssid: ssid || '',
+          wifiIndex: i + 1, wifiTotal: order.length, ssid: ssid || '',
         }));
         await retryWait(RETRY_GAP_MS);
         continue;
       }
     }
 
-    // 记录该 WIFI 的完成度
-    const recStatus = ok
-      ? 'completed'
-      : (terminal === TaskStatus.FAILED ? 'failed' : terminal);
     statsMod.recordWifi(run, {
       ssid: ssid || null,
-      status: recStatus,
+      status: ok ? 'completed' : (terminal === TaskStatus.FAILED ? 'failed' : terminal),
       attempts: attempts,
       retriesUsed: Math.max(0, attempts - 1),
       error: ok ? null : (terminal === TaskStatus.FAILED ? '流程连续失败 ' + attempts + ' 次（含 ' + MAX_RETRIES + ' 次重试）' : terminal),
     });
 
-    if (controlBreak) {
-      finalStatus = terminal; // 暂停/停止，跳出外层
-      break;
-    }
+    if (controlBreak) { finalStatus = terminal; break; }
     if (!ok && terminal === TaskStatus.FAILED) {
-      finalStatus = TaskStatus.FAILED; // 有失败则整体标记失败，但继续跑完剩余 WIFI
+      finalStatus = TaskStatus.FAILED;
       emit(P.makeProgress({
-        taskId: config.taskId,
-        type: EventType.WIFI_POLL,
+        taskId: config.taskId, type: EventType.WIFI_POLL,
         message: '『' + (ssid || '当前网络') + '』流程连续失败 ' + attempts + ' 次，跳过该 WIFI 并继续下一个',
-        wifiIndex: i + 1,
-        wifiTotal: order.length,
-        ssid: ssid || '',
+        wifiIndex: i + 1, wifiTotal: order.length, ssid: ssid || '',
       }));
     }
   }
 
   if (abort && finalStatus === TaskStatus.COMPLETED) finalStatus = abortStatus;
 
-  // ---- 完成度统计与分析持久化 ----
   const saved = statsMod.save(run);
   emit(P.makeProgress({
     taskId: config.taskId,
@@ -295,6 +570,9 @@ async function runTask(config, emit, opts) {
   return finalStatus;
 }
 
+// ===========================================================================
+// IPC
+// ===========================================================================
 process.on('message', async (msg) => {
   if (!msg || typeof msg !== 'object') return;
 
@@ -310,10 +588,10 @@ process.on('message', async (msg) => {
       else ipcType = 'done';
 
       send(ipcType, P.makeProgress({
-        taskId: config.taskId,
+        taskId: config && config.taskId,
         type: EventType.TASK_END,
         status: finalStatus,
-        message: 'worker 结束' + (config.pollWifi ? '（WIFI 轮询模式）' : ''),
+        message: 'worker 结束',
       }));
     } catch (e) {
       const errMsg = e && e.message ? e.message : String(e);
@@ -355,4 +633,4 @@ process.on('unhandledRejection', (reason) => {
   }
 });
 
-module.exports = { runTask, sleep };
+module.exports = { runTask, runLegacy, runPhased, buildWifiSeq, sleep };
