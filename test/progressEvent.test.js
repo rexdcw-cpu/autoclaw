@@ -87,10 +87,11 @@ test('RoundStatus has all required values', () => {
 // ERR_* constants (all 8)
 // ---------------------------------------------------------------------------
 
-test('all 13 ERR_ constants are present with expected string values', () => {
+test('all 14 ERR_ constants are present with expected string values', () => {
   // v0.2 (T-D1~T-D5) added ERR_DB_WRITE + ERR_DB_QUERY to the original 8.
   // T0 added ERR_BAIDU_CAPTCHA (11 total).
   // V2 客户线 added ERR_CLIENT_NOT_FOUND + ERR_CLIENT_HAS_TASKS (13 total).
+  // v0.3.18 谷歌走 VPN 新增 ERR_VPN_UNAVAILABLE（14 total）。
   const expected = [
     'ERR_INVALID_CONFIG',
     'ERR_NO_TARGET',
@@ -105,12 +106,13 @@ test('all 13 ERR_ constants are present with expected string values', () => {
     'ERR_DB_QUERY',
     'ERR_CLIENT_NOT_FOUND',
     'ERR_CLIENT_HAS_TASKS',
+    'ERR_VPN_UNAVAILABLE',
   ];
   for (const code of expected) {
     assert.ok(ERR[code], `missing ERR.${code}`);
     assert.strictEqual(ERR[code], code);
   }
-  assert.strictEqual(Object.keys(ERR).length, 13);
+  assert.strictEqual(Object.keys(ERR).length, 14);
 });
 
 // ---------------------------------------------------------------------------

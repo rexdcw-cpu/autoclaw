@@ -47,9 +47,19 @@ function newRun(taskId, meta) {
     keywords: meta.keywords || null,
     clientId: meta.clientId || null,
     wifiSource: meta.wifiSource || null, // 'remembered' | 'fallback' | null
+    vpn: null, // 谷歌任务前的 VPN 出口状态：{ availableCount, total, usedNode, proxyUrl, skipped }
     perWifi: [], // { ssid, status:'completed'|'failed'|'skipped', attempts, retriesUsed, error }
     summary: null,
   };
+}
+
+/**
+ * 记录 VPN 出口状态（谷歌任务前探测所得），落到本次运行容器。
+ * @param {object} run newRun() 产物
+ * @param {{availableCount:number, total:number, usedNode?:string, proxyUrl?:string, skipped?:boolean, error?:string}} vpn
+ */
+function recordVpn(run, vpn) {
+  run.vpn = vpn || null;
 }
 
 /**
@@ -89,6 +99,7 @@ function summarize(run) {
     totalFlowAttempts: totalAttempts,
     totalRetries: totalRetries,
     overall: failed === 0 && skipped === 0 ? 'completed' : (failed > 0 ? 'failed' : 'partial'),
+    vpn: run.vpn || null,
   };
   return run.summary;
 }
@@ -125,6 +136,25 @@ function renderMarkdown(run) {
   lines.push('| 累计重试次数 | ' + s.totalRetries + ' |');
   lines.push('| 整体结论 | ' + s.overall + ' |');
   lines.push('');
+
+  // VPN 出口维度（仅当任务含谷歌且探测过主节点时记录）
+  if (run.vpn) {
+    const v = run.vpn;
+    lines.push('## VPN 出口（谷歌任务）');
+    lines.push('');
+    if (v.skipped) {
+      lines.push('- 状态：**跳过**（VPN 无可用主节点，已剔除超时/不可达项）');
+      lines.push('- 主节点总数：' + (v.total != null ? v.total : '未知'));
+      if (v.error) lines.push('- 原因：' + v.error);
+    } else {
+      lines.push('- 状态：已开启并走 VPN 出口');
+      lines.push('- 主节点可用：' + (v.availableCount != null ? v.availableCount : '?') + ' / ' + (v.total != null ? v.total : '?'));
+      lines.push('- 选用节点：' + (v.usedNode || (v.current || '未知')));
+      lines.push('- 代理地址：' + (v.proxyUrl || '（未记录）'));
+    }
+    lines.push('');
+  }
+
   lines.push('## 逐 WIFI 明细');
   lines.push('');
   lines.push('| # | WIFI / 网络 | 终态 | 尝试次数 | 重试次数 | 备注 |');
@@ -173,6 +203,7 @@ function save(run) {
     keyword: run.keyword,
     keywords: run.keywords,
     clientId: run.clientId,
+    vpn: run.vpn || null,
     summary: run.summary,
   });
   if (arr.length > 200) arr = arr.slice(-200);
@@ -184,6 +215,7 @@ function save(run) {
 module.exports = {
   newRun,
   recordWifi,
+  recordVpn,
   summarize,
   renderMarkdown,
   save,

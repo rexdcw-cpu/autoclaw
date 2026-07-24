@@ -160,6 +160,15 @@
     } else if (type === 'alert') {
       showAlert(ev.message);
       appendLine('<span class="t">' + escapeHtml(ev.timestamp) + '</span> ⚠ ' + escapeHtml(ev.message), 'line-alert');
+    } else if (type === 'vpn_info') {
+      var vm = ev.vpn || {};
+      var vtxt = vm.skipped
+        ? '⚠ VPN 无可用主节点，谷歌任务跳过'
+        : '🔐 VPN 已开启：主节点可用 ' + (vm.availableCount != null ? vm.availableCount : '?') + '/' +
+          (vm.total != null ? vm.total : '?') + '，已切至『' + escapeHtml(vm.usedNode || vm.current || '—') + '』' +
+          (vm.proxyUrl ? '（' + escapeHtml(vm.proxyUrl) + '）' : '');
+      appendLine('<span class="t">' + escapeHtml(ev.timestamp) + '</span> ' + vtxt, 'line-round');
+    } else if (type === 'task_end') {
     } else if (type === 'task_end') {
       appendLine(
         '<span class="t">' + escapeHtml(ev.timestamp) + '</span> ■ 任务结束: <b>' +

@@ -29,6 +29,7 @@ const EventType = {
   ALERT: 'alert',
   WIFI_POLL: 'wifi_poll', // WIFI 轮询进度（切换/停留/第几轮）
   TASK_STATS: 'task_stats', // 任务完成度统计与分析（v0.3.12）
+  VPN_INFO: 'vpn_info', // VPN 出口状态（谷歌任务前：可用主节点数 / 已用节点 / 跳过原因）
 };
 
 /** 原子步骤名称（StepName） */
@@ -87,6 +88,7 @@ const ERR = {
   ERR_RETRY_EXHAUSTED: 'ERR_RETRY_EXHAUSTED',
   ERR_BROWSER_LAUNCH: 'ERR_BROWSER_LAUNCH',
   ERR_BAIDU_CAPTCHA: 'ERR_BAIDU_CAPTCHA', // 百度验证码未过/结果未加载（T0 新增，T4 落地 .code）
+  ERR_VPN_UNAVAILABLE: 'ERR_VPN_UNAVAILABLE', // 谷歌任务前 VPN 无可用主节点（已剔除超时/不可达），跳过谷歌轮次
   ERR_TASK_NOT_FOUND: 'ERR_TASK_NOT_FOUND',
   ERR_TASK_RUNNING: 'ERR_TASK_RUNNING',
   ERR_DB_WRITE: 'ERR_DB_WRITE',

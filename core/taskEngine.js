@@ -21,6 +21,7 @@ const { BrowserSession } = require('./browserSession');
 const { BaiduAdapter } = require('./adapters/baiduAdapter');
 const { GoogleAdapter } = require('./adapters/googleAdapter');
 const { matchContactLink } = require('./linkMatcher');
+const VpnController = require('./vpnController');
 const P = require('./progressEvent');
 const {
   EventType,
@@ -79,12 +80,14 @@ class TaskEngine {
    * @param {object} config TaskConfig（来自 core/taskConfig.buildTaskConfig）
    * @param {(event:object)=>void} emit 进度回调，worker 用它经 IPC 回传 ProgressEvent
    */
-  constructor(config, emit) {
+  constructor(config, emit, opts) {
     this.config = config;
     this.emit = typeof emit === 'function' ? emit : () => {};
     this.adapters = { baidu: new BaiduAdapter(), google: new GoogleAdapter() };
     /** @type {import('playwright').BrowserContext|null} */
     this.ctx = null;
+    // VPN 控制器（可注入，便于单测；默认对接本机 Mihomo Party 控制 API）
+    this.vpn = (opts && opts.vpn) || VpnController;
 
     // 控制信号（由 manager 经 IPC control 消息设置）
     this.shouldPause = false;
@@ -92,9 +95,17 @@ class TaskEngine {
     // 熔断标志（失败率超阈值）
     this.circuitPaused = false;
 
+    // VPN 状态（切入谷歌时变更）
+    this._usingVpn = false; // 当前浏览器是否带代理启动
+    this._vpnChecked = false; // 是否已做过一次「可用节点探测」
+    this._vpnDiag = null; // 最近一次探测结果
+    this._vpnNode = null; // 当前选用的主节点
+    this._googleUnavailable = false; // VPN 无可用节点 → 谷歌轮次全部跳过
+
     // 统计
     this.successCount = 0;
     this.failCount = 0;
+    this.skipCount = 0;
   }
 
   /** 请求暂停（在下一轮安全点生效） */
@@ -115,12 +126,34 @@ class TaskEngine {
    * 启动任务主循环。
    * @returns {Promise<string>} 终态 TaskStatus
    */
+  /**
+   * 计算首轮启动浏览器时使用的代理：
+   *   - 若首个平台是 google（即只跑谷歌），直接用 VPN 出口代理启动；
+   *   - 否则（百度优先/仅百度）启动时不带代理（百度走本机真实 IP）。
+   * 后续切入谷歌时由 _ensurePlatformNetwork 负责重拉带代理的浏览器。
+   * @returns {{httpProxy:string}|null}
+   */
+  _initialProxyFor() {
+    const firstPlatform = (this.config.platforms && this.config.platforms[0]) || 'baidu';
+    if (firstPlatform === 'google') {
+      try {
+        const url = this.vpn.getProxyUrl();
+        if (url) return { httpProxy: url };
+      } catch (e) {
+        /* 拿不到 VPN 代理就降级为 config.proxy */
+      }
+    }
+    return this.config.proxy || null;
+  }
+
   async run() {
     const session = new BrowserSession();
     let finalStatus = TaskStatus.COMPLETED;
     try {
-      await session.launch(this.config.proxy || null);
+      const initialProxy = this._initialProxyFor();
+      await session.launch(initialProxy);
       this.ctx = await session.newContext();
+      this._usingVpn = !!(initialProxy && initialProxy.httpProxy);
     } catch (e) {
       this.emit(
         P.makeProgress({
@@ -187,6 +220,135 @@ class TaskEngine {
   }
 
   // -------------------------------------------------------------------------
+  // 平台网络保障（百度走本机 IP / 谷歌走 VPN）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 重拉浏览器（带 / 不带代理）。在平台切换边界调用（round 之间 page 已关闭）。
+   * @param {{httpProxy:string}|null} proxy
+   */
+  async _relaunch(proxy) {
+    try {
+      await this.session.close();
+    } catch (e) {
+      /* 关闭失败不阻塞，下面 launch 会兜底 */
+    }
+    await this.session.launch(proxy);
+    this.ctx = await this.session.newContext();
+    this._usingVpn = !!(proxy && proxy.httpProxy);
+  }
+
+  /**
+   * 进入某个 round 前，确保浏览器网络与该平台匹配：
+   *   - 百度：确保「不带代理」（本机真实 IP）；
+   *   - 谷歌：首次进入时探一遍 VPN 主节点，剔除【超时】/不可达项；
+   *          有可用节点则选最优并（若尚未带代理）重拉带 7890 代理的浏览器，
+   *          并 emit VPN_INFO；无可用节点则 ALERT + 返回 false（该轮跳过）。
+   * 调用方据返回值决定是否跳过本轮。
+   * @param {{roundIndex:number,totalRounds:number,platform:string,keyword:string}} plan
+   * @returns {Promise<boolean>} true=可继续；false=该轮应跳过（如 VPN 不可用）
+   */
+  async _ensurePlatformNetwork(plan) {
+    if (plan.platform !== 'google') {
+      // 百度：确保无代理（正常不会发生，因为 buildRounds 顺序为 baidu→google）
+      if (this._usingVpn) {
+        await this._relaunch(null);
+      }
+      return true;
+    }
+
+    // 谷歌：仅探测一次（同任务内所有谷歌轮次复用结论）
+    if (!this._vpnChecked) {
+      let diag;
+      try {
+        diag = await this.vpn.getAvailableMainNodes();
+      } catch (e) {
+        diag = { available: [], error: e.message };
+      }
+
+      if (!diag || !diag.available || diag.available.length === 0) {
+        // 无可用节点：跳过本次（及后续）所有谷歌轮次，不计入失败率
+        this._googleUnavailable = true;
+        this.emit(
+          P.makeProgress({
+            taskId: this.config.taskId,
+            type: EventType.ALERT,
+            message:
+              'VPN 无可用主节点（已剔除超时/不可达节点），跳过谷歌任务：' +
+              (diag && diag.error ? diag.error : '无可用节点'),
+          }),
+        );
+        this.emit(
+          P.makeProgress({
+            taskId: this.config.taskId,
+            type: EventType.VPN_INFO,
+            message: 'VPN 无可用主节点，谷歌任务跳过',
+            vpn: { availableCount: 0, total: diag ? diag.total : 0, skipped: true, proxyUrl: diag ? diag.proxyUrl : null },
+          }),
+        );
+        this._vpnChecked = true;
+        return false;
+      }
+
+      // 选延迟最低的可用节点切过去（best-effort）
+      const best = diag.available[0];
+      try {
+        await this.vpn.selectNode(best);
+      } catch (e) {
+        /* 切节点失败不阻断，沿用当前节点 */
+      }
+
+      // 若浏览器当前没有带代理，则重拉带 VPN 代理的浏览器
+      if (!this._usingVpn) {
+        try {
+          await this._relaunch({ httpProxy: diag.proxyUrl });
+        } catch (e) {
+          this.emit(
+            P.makeProgress({
+              taskId: this.config.taskId,
+              type: EventType.ALERT,
+              message: '谷歌任务：重拉带代理的浏览器失败，跳过谷歌任务：' + e.message,
+            }),
+          );
+          this._googleUnavailable = true;
+          this._vpnChecked = true;
+          this.emit(
+            P.makeProgress({
+              taskId: this.config.taskId,
+              type: EventType.VPN_INFO,
+              message: 'VPN 浏览器重拉失败，谷歌任务跳过',
+              vpn: { availableCount: diag.available.length, total: diag.total, skipped: true, usedNode: best, proxyUrl: diag.proxyUrl },
+            }),
+          );
+          return false;
+        }
+      }
+
+      this._vpnChecked = true;
+      this._vpnDiag = diag;
+      this._vpnNode = best;
+      this.emit(
+        P.makeProgress({
+          taskId: this.config.taskId,
+          type: EventType.VPN_INFO,
+          message:
+            'VPN 已开启（谷歌任务）：主节点可用 ' + diag.available.length + '/' + diag.total +
+            ' 个（已剔除超时/不可达），已切至『' + best + '』',
+          vpn: {
+            availableCount: diag.available.length,
+            total: diag.total,
+            usedNode: best,
+            current: diag.current,
+            proxyUrl: diag.proxyUrl,
+            availableDetail: diag.availableDetail || null,
+          },
+        }),
+      );
+    }
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
   // 单轮
   // -------------------------------------------------------------------------
 
@@ -198,6 +360,33 @@ class TaskEngine {
    */
   async runRound(plan) {
     const taskId = this.config.taskId;
+
+    // 切入该轮前，确保浏览器网络与该平台匹配（百度无代理 / 谷歌走 VPN 出口）。
+    // 返回 false 表示该轮应跳过（如 VPN 无可用节点），不计入失败率。
+    const networkOk = await this._ensurePlatformNetwork(plan);
+    if (!networkOk) {
+      const round = P.makeRound(
+        taskId,
+        plan.platform,
+        plan.keyword,
+        plan.roundIndex,
+        plan.totalRounds,
+        RoundStatus.SKIPPED,
+      );
+      round.error = ERR.ERR_VPN_UNAVAILABLE;
+      this.skipCount += 1;
+      this.emit(P.makeProgress({ taskId, type: EventType.ROUND_START, round, stats: this._makeStats() }));
+      this.emit(
+        P.makeProgress({
+          taskId,
+          type: EventType.ROUND_END,
+          round: Object.assign({}, round, { finishedAt: P.now() }),
+          stats: this._makeStats(),
+        }),
+      );
+      return false;
+    }
+
     const page = await this.ctx.newPage();
     const round = P.makeRound(
       taskId,
@@ -615,8 +804,10 @@ class TaskEngine {
 
   /** 组装当前统计快照 */
   _makeStats() {
-    const done = this.successCount + this.failCount;
-    return P.makeStats(this.config.rounds.length, done, this.successCount, this.failCount);
+    const done = this.successCount + this.failCount + this.skipCount;
+    const stats = P.makeStats(this.config.rounds.length, done, this.successCount, this.failCount);
+    stats.skipCount = this.skipCount;
+    return stats;
   }
 }
 

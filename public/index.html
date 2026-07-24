@@ -18,8 +18,8 @@
         <fieldset class="field">
           <legend>平台（多选）</legend>
           <label class="check"><input type="checkbox" name="platforms" value="baidu" checked /> 百度</label>
-          <!-- 谷歌半部分：本地仅跑百度（谷歌需 VPN），UI 隐藏并默认不勾选；后端代码未禁用，仍可由 API 提交 -->
-          <label class="check" style="display:none"><input type="checkbox" name="platforms" value="google" /> 谷歌</label>
+          <label class="check"><input type="checkbox" name="platforms" value="google" /> 谷歌（需 VPN 出口）</label>
+          <small class="hint">同时勾选百度 + 谷歌时：先跑完百度（走本机真实 IP），再自动开启 VPN 出口跑谷歌。谷歌开始前列举 VPN 主节点、剔除【超时】/不可达节点、切到最优节点后再开 Chrome。</small>
         </fieldset>
 
         <!-- 关键词 -->

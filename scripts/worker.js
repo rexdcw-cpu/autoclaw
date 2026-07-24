@@ -89,6 +89,10 @@ async function runTask(config, emit, opts) {
   // 看起来像任务中途断了。这里把它改写为一条普通的 wifi_poll「子流程结束」提示
   // （保留 stats 供实时失败率），真正的终态框只由 worker 末尾的 TASK_END 渲染。
   const engineEmit = (ev) => {
+    // 捕获 VPN 状态事件，落到完成度汇总（谷歌任务前记录可用节点数 / 选用节点）
+    if (ev && ev.type === EventType.VPN_INFO && ev.vpn) {
+      statsMod.recordVpn(run, ev.vpn);
+    }
     if (config.pollWifi && ev && ev.type === EventType.TASK_END) {
       emit(P.makeProgress({
         taskId: config.taskId,

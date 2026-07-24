@@ -4,6 +4,16 @@
 
 ---
 
+## [0.3.18] — 2026-07-24
+- **feat(vpn)：谷歌任务自动开启 VPN 出口（多选平台流程打通）**
+  - 前端放开「谷歌」多选（此前 `display:none` 隐藏）；同时勾选百度+谷歌时，沿用既有的百度→谷歌串行顺序——先跑完百度（本机真实 IP），再切到谷歌时自动开启 VPN。
+  - 新增 `core/vpnController.js`：对接本地 Mihomo Party / Clash 控制 API（9090），任务前列举 VPN 主节点组、逐个测延迟、**剔除【超时】/不可达节点**、选延迟最低节点切过去，并返回给引擎本机代理地址（mihomo mixed 端口 7890）。
+  - 安全：控制端口 `secret` **不写死在源码**（避免公开仓库泄露），优先读 `AUTOCLAW_VPN_SECRET`，缺失时回落读取 `%APPDATA%/mihomo-party/mihomo.yaml` 的 `secret` 字段；所有 HTTP 调用 try/catch，API 不可达时优雅返回空（谷歌轮次跳过而非崩溃）。
+  - 引擎 `core/taskEngine.js`：切入谷歌前 `_ensurePlatformNetwork` 探测可用节点；无可用则 `ALERT` + 跳过谷歌轮次（`RoundStatus.SKIPPED`，不计入失败率）；有则选最优节点并重拉带代理的 Chrome 走 VPN。百度轮次始终不带代理。
+  - 完成度汇总 `core/taskStats.js` 新增 VPN 维度（`recordVpn` + Markdown「VPN 出口」段落 + 滚动条目），`scripts/worker.js` 捕获 `VPN_INFO` 事件落盘；进度页 `progress.js` 渲染 VPN 状态行。
+  - `EventType.VPN_INFO` / `ERR.ERR_VPN_UNAVAILABLE` 新增；新增 `test/vpnController.test.js`（6 项，注入假 transport，覆盖超时剔除/排序/切节点/API 不可达/yaml 解析 secret）。
+  - 全量 268 项测试通过（0 失败 / 1 跳过）。
+
 ## [0.3.14] — 2026-07-23
 - **fix(ui)：任务结束后展示「完成度总结」卡片**
   - 根因：`progress.js` 的 `renderEvent` 没有处理后端早已发出的 `task_stats` 事件（含汇总 + 逐 WIFI 明细），
