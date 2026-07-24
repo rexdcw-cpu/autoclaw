@@ -40,7 +40,9 @@
  *  4) locateTarget 精准取标题链接 + 复用基类双匹配 + 失败诊断：
  *     旧版遍历结果块内「全部 <a>」（含站点链接/sitelink/页脚噪声），易误匹配；
  *     且未复用基类 matchTarget、无失败诊断。本版：
- *       - 用 `#rso h3 a` 精准取每条结果的标题主链接（排除 sitelink/页脚噪声）；
+ *       - 用结果主链接选择器精准取每条结果的标题链接（排除 sitelink/页脚噪声）；
+ *         2026-07:25 确认 Google SERP 已从 <h3><a> 结构迁移到 <a data-ved> 容器，
+ *         选择器同步更新为 #rso .MjjYud > div > a[data-ved]（兼容新旧布局）。
  *       - 解析 Google 跳转链接（/url?q= 或相对路径）为真实落地地址；
  *       - 复用 PlatformAdapter.matchTarget（strict:false，启用 domain-only 兜底）；
  *       - 未命中时抛出明确中文诊断（域名未进排名 / 标题未中关键词）。
@@ -50,7 +52,13 @@ const { PlatformAdapter } = require('./platformAdapter');
 
 const GOOGLE_HOME = 'https://www.google.com';
 const SEARCH_BOX = 'textarea[name="q"]';
-const RESULT_TITLE_LINK = '#rso h3 a';
+/**
+ * 结果标题主链接选择器（Google SERP 2026 新结构）。
+ * 优先匹配新版 <a data-ved> 容器（#rso .MjjYud 内），回退旧版 #rso h3 a。
+ * @see _parseResultAnchors（实际取并集，不依赖单一常量）
+ */
+const RESULT_TITLE_LINK_NEW = '#rso .MjjYud > div > a[data-ved], #rso a[data-ved]';
+const RESULT_TITLE_LINK_OLD = '#rso h3 a';
 
 /**
  * search / open 子动作超时（毫秒）。设计目标同 baiduAdapter：
@@ -441,13 +449,20 @@ class GoogleAdapter extends PlatformAdapter {
   }
 
   /**
-   * 把结果页标题主链接（#rso h3 a）解析为 {title, href} 列表：
-   * google 跳转链接（/url?q= 或相对路径）解析为真实落地地址；直接 https 链接沿用。
+   * 把结果页标题主链接解析为 {title, href} 列表：
+   * Google SERP 2026 新结构：结果链接为 <a data-ved> 容器，标题在内部
+   * [role="heading"] / h3 子元素中（不再直接是 <a> 的 textContent）。
+   * 旧结构 <h3><a> 作为回退兼容。google 跳转链接（/url?q= 或相对路径）
+   * 解析为真实落地地址；直接 https 链接沿用。
    * @param {import('playwright').Page} page
    * @returns {Promise<{title:string,href:string}[]>}
    */
   async _parseResultAnchors(page) {
-    const anchors = await page.$$(RESULT_TITLE_LINK);
+    // 优先新版选择器（2026 Google SERP <a data-ved> 容器），回退旧版 #rso h3 a
+    let anchors = await page.$$(RESULT_TITLE_LINK_NEW);
+    if (!anchors || anchors.length === 0) {
+      anchors = await page.$$(RESULT_TITLE_LINK_OLD);
+    }
 
     // 安全读取元素属性/文本（部分 mock 元素可能未实现对应方法）
     const safeText = async (el) => {
@@ -463,14 +478,35 @@ class GoogleAdapter extends PlatformAdapter {
       return '';
     };
 
+    // 新版标题提取：从 [role="heading"] / h3 子元素取（不再直接用 <a> 的 textContent）
+    const extractTitle = async (anchorEl) => {
+      try {
+        // 1. 优先取内部 heading 元素
+        const heading = await anchorEl.$('[role="heading"], h3, [data-attrid="title"]');
+        if (heading) {
+          const t = await heading.textContent();
+          if (t && t.trim()) return t.trim();
+        }
+        // 2. 回退：取第一个有实质文本的子 div/span
+        const directText = await anchorEl.evaluate((el) => {
+          for (const child of el.children) {
+            const t = (child.textContent || '').trim();
+            if (t && t.length > 4 && !/^\s*$/.test(t)) return t;
+          }
+          return '';
+        });
+        if (directText) return directText;
+      } catch (e) { /* fall through */ }
+      // 3. 最终回退：整个 anchor 的 textContent
+      return (await safeText(anchorEl)).toString();
+    };
+
     const parsed = [];
     for (const a of anchors) {
-      const title = (await safeText(a)).toString();
+      const title = await extractTitle(a);
       const href = (await safeAttr(a, 'href')) || '';
       if (!/^https?:\/\//i.test(href) && !href.startsWith('/')) continue;
-      // 优先从 Google 跳转链接的 q 参数直接解出真实地址（零网络、稳定）；
-      // 解出的仍是 https 链接则用解码结果，否则回退 resolveFinalUrl（仅对绝对
-      // https 链接生效，相对链接保持原样交给后续 goto 解析）。
+      // 优先从 Google 跳转链接的 q/url 参数直接解出真实地址（零网络、稳定）；
       const decoded = _decodeGoogleRedirect(href);
       let realUrl = decoded;
       if (!/^https?:\/\//i.test(decoded)) {

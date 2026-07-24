@@ -4,6 +4,21 @@
 
 ---
 
+## [0.3.29] — 2026-07-25
+
+### Fixed
+- **Google SERP 选择器适配 2026 新 DOM 结构**（根因修复，解决"第一页有目标但识别不到"）：
+  Google 搜索结果页已从 `<h3><a>标题</a></h3>` 迁移到 `<a data-ved><div role="heading">标题</div></a>`
+  容器结构。旧选择器 `#rso h3 a` 在新版 SERP 下返回 **0 条结果**（全页 `h3 > a` 总计也为 0），
+  导致即使目标站排在第一页也匹配不到、翻 5 页后报"未找到"。修：
+  - 新增主选择器 `#rso .MjjYud > div > a[data-ved], #rso a[data-ved]`（命中 25 条 vs 旧版 0 条）；
+  - 标题提取逻辑升级：优先从 `[role="heading"]` / `h3` / `[data-attrid="title"]` 子元素取
+    （不再依赖 `<a>` 的直接 textContent），逐级回退到子 div 文本 → anchor 全文本；
+  - 旧选择器 `#rso h3 a` 保留为回退（兼容未更新的旧布局区域/节点）。
+- 新增单测：2026 新版 `a[data-ved]` + `[role="heading"]` 结构下目标仍正确匹配。
+
+---
+
 ## [0.3.28] — 2026-07-24
 
 ### Fixed

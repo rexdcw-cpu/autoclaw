@@ -46,7 +46,9 @@ function makeInputProto() {
  *   - startConsent: 初始落在同意页（URL=consent.google.com）。配合 opts.consent
  *     （{accepted:false}）与 opts.consentButtons（含「同意」按钮）模拟同意流程。
  *   - captchaPolls: 前 N 次轮询处于验证码页（URL=sorry），之后恢复正常结果页。
- *   - resultAnchors: locateTarget 时 `page.$$('#rso h3 a')` 返回的假链接数组。
+ *   - resultAnchors: locateTarget 时 `page.$$('#rso h3 a')` 返回的假链接数组（旧版 DOM）。
+ *   - newStyleAnchors: locateTarget 时新版 `page.$$('#rso a[data-ved]')` 返回的假链接数组
+ *     （2026 Google SERP 新结构）。每项为 { title, href }，title 模拟 [role="heading"] 子元素文本。
  *   - pages: 多页场景。`[{ anchors, nextHref }, ...]`，pageIndex 从 0 起，
  *     调 goto 含 `start=` 的 URL 时推进到下一页；默认由 resultAnchors 退化为单页。
  *   - baseUrl/baseBody: 正常（非同意/非验证码）时的 URL/正文。
@@ -182,6 +184,11 @@ function makeGooglePage(opts = {}) {
     },
     async $$(sel) {
       calls.$$.push(sel);
+      // 新版 2026 Google SERP: a[data-ved] 容器（优先）
+      if (sel.includes('a[data-ved]') && opts.newStyleAnchors) {
+        return (opts.newStyleAnchors || []).slice();
+      }
+      // 旧版 #rso h3 a
       if (sel === '#rso h3 a') return (curPage().anchors || []).slice();
       return [];
     },
@@ -195,6 +202,28 @@ function makeAnchor(title, href) {
   return {
     textContent: async () => title,
     getAttribute: async (n) => (n === 'href' ? href : ''),
+  };
+}
+
+/**
+ * 构建新版 Google SERP（2026 a[data-ved] 容器）假链接。
+ * 标题在 [role="heading"] 子元素内，不在 <a> 的直接 textContent 中。
+ */
+function makeNewStyleAnchor(title, href) {
+  const heading = {
+    textContent: async () => title,
+  };
+  return {
+    textContent: async () => '', // <a> 本身无直接文本
+    getAttribute: async (n) => (n === 'href' ? href : n === 'data-ved' ? '2ahUKEwi' : ''),
+    $: async (sel) => {
+      if (sel === '[role="heading"], h3, [data-attrid="title"]') return heading;
+      return null;
+    },
+    $$: async (sel) => {
+      if (sel === '[role="heading"], h3, [data-attrid="title"]') return [heading];
+      return [];
+    },
   };
 }
 
@@ -480,4 +509,27 @@ test('locateTarget(): relative /url?q= wrapper decoded to REAL url (domain-only 
   });
   assert.strictEqual(href, 'https://www.manincorp.cn/', 'should decode relative google redirect wrapper');
   assert.ok(!href.includes('google.com/url'), 'decoded relative wrapper must NOT retain google redirect');
+});
+
+test('locateTarget(): 2026 new SERP structure (a[data-ved] + [role="heading]) matches target', async () => {
+  const adapter = new GoogleAdapter();
+  // 新版 DOM：#rso h3 a 返回空（旧选择器失效），但 #rso a[data-ved] 有结果
+  const { page, calls } = makeGooglePage({
+    resultAnchors: [],  // 旧选择器返回空
+    newStyleAnchors: [
+      makeNewStyleAnchor('人才引进计划-香港永居申请', 'https://www.globevisa.com.sg/'),
+      makeNewStyleAnchor('萬年移民—中國香港移民', 'https://www.maninvisa.com/'),
+      makeNewStyleAnchor('万年移民', 'https://www.manincorp.cn/'),  // ← 目标
+      makeNewStyleAnchor('其他移民服务', 'https://other.example.com/'),
+    ],
+  });
+
+  const href = await adapter.locateTarget(page, {
+    domain: 'manincorp.cn',
+    titleKeywords: ['万年移民'],
+  });
+  assert.strictEqual(href, 'https://www.manincorp.cn/', 'should match from new-style a[data-ved] anchors');
+  // 应该先尝试新选择器，旧选择器作为回退也被调用但返回空
+  const triedNew = calls.$$.some(function (s) { return s.includes('a[data-ved]'); });
+  assert.ok(triedNew, 'should try new a[data-ved] selector first');
 });
