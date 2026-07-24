@@ -4,6 +4,13 @@
 
 ---
 
+## [0.3.24] — 2026-07-24
+- **fix(googleAdapter)：修复谷歌搜索框填写失败（根因：textarea / input 原型错配）**
+  - 症状：谷歌阶段每个 VPN 节点都在 ~2s 内 `search` 步骤失败，统计里只显示笼统的「填写谷歌搜索词超时」，14/17 节点全红，谷歌任务 100% 失败。此前误判为「无头沙箱 Chrome 熔断」，实为**代码 bug**。
+  - 根因：谷歌首页搜索框是 `<textarea name="q">`，但 `search()` 步骤B 用 `HTMLInputElement.prototype` 的 value setter 去写它，对 textarea 调用会抛 `Illegal invocation`。该异常被 `_withStep` 吞掉、伪装成「超时」，导致每个节点都立刻失败。
+  - 修复：① 步骤B 改为取「元素自身原型」的 value setter（`el.constructor.prototype`），input/textarea 通吃；② `_withStep` 透传底层真实错误（如 `Illegal invocation`），run_log 可直接看到真因，不再被笼统「超时」掩盖。
+  - 验证：单测 274/1skip 全绿；独立 e2e 复现 `open OK → search OK → 抵达结果页 #rso`，证明搜索提交链路恢复（测试用的「万年移民/mzsw.gov.cn」未进排名属预期，非 bug）。
+
 ## [0.3.23] — 2026-07-24
 - **fix(vpnLauncher)：纠正「步骤1」的误判逻辑**。autoclaw 的 Chrome 用 `--proxy-server=127.0.0.1:7890` 直连 Mihomo 内核，**不读 Windows 系统代理**，故原"点击系统代理开关"对谷歌无效且误导。改为：① 先 TCP 探 7890 监听，监听即过（内核常驻的常见情况）；② 未监听则 best-effort 拉起 Mihomo Party 主程序（带起内核 sidecar），等 5s 重测；③ 仍不通则发明确告警"请在 Mihomo Party 启动内核"，不再假装"开启 VPN"；④ 原 `vpn_toggle.py` 点击脚本保留为可选（`AUTOCLAW_VPN_CLICK_SYSPROXY=1` 才启用）。worker 步骤文案同步改为"确认 Mihomo 内核/7890 可用"。实测：本机内核运行中，790/9090 监听、密钥鉴权通过、`getAvailableMainNodes` 返回 17 节点/15 可用、走 7890 打 Google 返回 200。
 

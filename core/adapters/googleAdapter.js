@@ -87,7 +87,9 @@ class GoogleAdapter extends PlatformAdapter {
     try {
       await fn();
     } catch (e) {
-      throw new Error(errMsg);
+      // 透传底层真实错误，便于 run_log 精准定位（避免笼统的「超时」掩盖真因）
+      const inner = e && e.message ? e.message : String(e);
+      throw new Error(errMsg + '（' + inner + '）');
     }
   }
 
@@ -281,16 +283,22 @@ class GoogleAdapter extends PlatformAdapter {
       });
     });
 
-    // 步骤B：填写搜索词（evaluate 写原生 value + 派发 input/change，绕开可见性）
+    // 步骤B：填写搜索词（evaluate 写原生 value + 派发 input/change，绕开可见性）。
+    // 注意：谷歌首页搜索框是 <textarea name="q">（不是 <input>），
+    // 必须用「元素自身原型」的 value setter，否则对 textarea 调用
+    // HTMLInputElement.prototype 的 setter 会抛「Illegal invocation」。
     await this._withStep('填写搜索词', '填写谷歌搜索词超时', async () => {
       await page.evaluate((kw) => {
         const el = document.querySelector('textarea[name="q"]');
         if (!el) throw new Error('google search box (textarea[name="q"]) not found');
-        const setter = Object.getOwnPropertyDescriptor(
-          window.HTMLInputElement.prototype,
-          'value'
-        ).set;
-        setter.call(el, kw);
+        const proto = (el.constructor && el.constructor.prototype) || window.HTMLInputElement.prototype;
+        const desc =
+          Object.getOwnPropertyDescriptor(proto, 'value') ||
+          Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+        if (!desc || typeof desc.set !== 'function') {
+          throw new Error('无法获取搜索框 value setter');
+        }
+        desc.set.call(el, kw);
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
       }, keyword);
