@@ -96,14 +96,15 @@ const MAX_RESULT_PAGES = 5;
  *     或重定向确认页，最终无法落到真实目标站（即用户反馈的「无法正确点击目标」）。
  * 直接解 `q` 参数既能拿到真实地址、又零网络开销、且稳定。
  *
- * 解析失败（无 q 参数 / 解出非 http(s)）一律回退原 href，由调用方兜底。
+ * 解析失败（无 q/url 参数 / 解出非 http(s)）一律回退原 href，由调用方兜底。
  * @param {string} href
  * @returns {string}
  */
 function _decodeGoogleRedirect(href) {
   if (!href || typeof href !== 'string') return href;
   try {
-    const m = href.match(/[?&]q=([^&#]+)/);
+    // Google 跳转链接的包装参数历史上用 q=，新版部分布局改用 url=，二者都尝试。
+    const m = href.match(/[?&](?:q|url)=([^&#]+)/);
     if (m) {
       const decoded = decodeURIComponent(m[1]);
       if (/^https?:\/\//i.test(decoded)) return decoded;
@@ -526,13 +527,30 @@ class GoogleAdapter extends PlatformAdapter {
         .catch(() => {});
     }
 
-    // ── 诊断：给出可操作的失败原因 ──
+    // ── 诊断：给出可操作的失败原因（并附实际看到的域名，便于确认是否排名问题）──
+    const seenDomains = [
+      ...new Set(
+        allParsed
+          .map((it) => {
+            try {
+              return new URL(it.href).hostname;
+            } catch (e) {
+              return null;
+            }
+          })
+          .filter(Boolean)
+      ),
+    ];
     const anyDomain = allParsed.some((it) => PlatformAdapter.matchHref(it.href, target.domain));
     if (!anyDomain) {
+      const seenPart = seenDomains.length
+        ? `。已扫描 ${scannedPages} 页实际看到的域名（前 20）：${seenDomains.slice(0, 20).join('、')}`
+        : `（${scannedPages} 页均未解析到任何外链，可能结果页结构变化或命中拦截页）`;
       throw new Error(
         `[locateTarget] 目标域名「${target.domain}」未出现在已扫描的 ${scannedPages} 页搜索结果中` +
-          `（可能目标站点未真正进入当前关键词的搜索排名）。建议：更换更精准的搜索关键词、` +
-          `或更换/确认目标域名后重试。`
+          seenPart +
+          `。可能该站点未真正进入当前节点此关键词的搜索排名；建议：更换更精准的关键词、` +
+          `或换/确认目标域名后重试。`
       );
     }
     // 防御性分支：domain-only 兜底已覆盖「域名在但标题未中」的情形，正常不会到达此处。

@@ -111,6 +111,10 @@ class TaskEngine {
     this.successCount = 0;
     this.failCount = 0;
     this.skipCount = 0;
+
+    // 本轮运行中最具诊断价值的失败原因（首个失败硬步骤的 detail，含真实异常文案）。
+    // worker 在 eng.run() 后读取，写入 task-stats 的 perWifi.error，避免只记笼统 "failed"。
+    this.lastErrorDetail = null;
   }
 
   /** 请求暂停（在下一轮安全点生效） */
@@ -463,6 +467,7 @@ class TaskEngine {
       if (searchStep.status === StepStatus.FAILED) {
         roundSuccess = false;
         round.error = ERR.ERR_ADAPTER_FAIL;
+        this.lastErrorDetail = searchStep.detail || String(round.error);
       }
 
       // 步骤间拟人微动作（search → locate）
@@ -482,6 +487,7 @@ class TaskEngine {
         if (locateStep.status === StepStatus.FAILED) {
           roundSuccess = false;
           round.error = ERR.ERR_NO_TARGET;
+          this.lastErrorDetail = locateStep.detail || String(round.error);
         }
 
         // 步骤间拟人微动作（locate → enter）
@@ -500,6 +506,7 @@ class TaskEngine {
         if (enterStep.status === StepStatus.FAILED) {
           roundSuccess = false;
           round.error = ERR.ERR_ADAPTER_FAIL;
+          this.lastErrorDetail = enterStep.detail || String(round.error);
         }
 
         // 步骤间拟人微动作（enter → stay）

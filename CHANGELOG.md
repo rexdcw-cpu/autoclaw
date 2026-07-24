@@ -4,6 +4,26 @@
 
 ---
 
+## [0.3.28] — 2026-07-24
+
+### Fixed
+- **真因透出（不再只记笼统 "failed"）**：worker 记录 perWifi.error 时读取
+  `engine.lastErrorDetail`（首个失败硬步骤的真实异常文案，含 locateTarget 诊断里
+  「实际看到的域名清单」），task-stats JSON 现在直接显示失败根因，便于定位是代码 bug
+  还是「目标站未进该节点排名」的 SEO 现实问题。
+- **解码兼容新版 Google 跳转参数**：`_decodeGoogleRedirect` 同时匹配 `q=` 与 `url=`
+  两种包装参数，避免新版布局下仍 goto Google 重定向页。
+- **domain-only 兜底优先点官网首页**：`matchTarget` 多个同域候选时按路径深度升序，
+  优先选「官网根（路径最短）」而非深层页面（如 `/news/123`），降低「点错目标页」概率。
+- **locateTarget 诊断增强**：未命中时把已扫描页中实际解析到的域名清单写入错误，
+  一眼看清 Google 到底返回了哪些站点。
+
+### Changed
+- 重启默认恢复「全节点轮询」（移除此前为单流程验证加的 `AUTOCLAW_GOOGLE_MAX_NODES=1`）；
+  验证点击修复时目标站会在排得上名的节点上被点到。`AUTOCLAW_GOOGLE_MAX_NODES=N` 仍可按需设。
+
+---
+
 ## [0.3.27] — 2026-07-24
 
 ### Fixed

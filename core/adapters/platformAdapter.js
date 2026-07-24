@@ -16,6 +16,20 @@
  */
 
 // -------------------------------------------------------------------------
+// 命中结果「官网首页优先」辅助：路径越浅越像首页（用于 domain-only 兜底时
+// 优先点官网根而非深层页面，降低「点错目标」概率）。
+// -------------------------------------------------------------------------
+function _pathDepth(href) {
+  try {
+    const u = new URL(href);
+    const p = (u.pathname || '/').replace(/^\/+|\/+$/g, '');
+    return p ? p.split('/').length : 0;
+  } catch (e) {
+    return 999; // 异常 URL 视为最不优先
+  }
+}
+
+// -------------------------------------------------------------------------
 // 繁→简归一化（解决「VPN 节点地区导致 Google 结果页用繁体」的匹配失配）
 // -------------------------------------------------------------------------
 // 不同 VPN 节点（如香港 / 台湾）会让 Google 以繁体中文渲染结果标题，而用户
@@ -220,7 +234,7 @@ class PlatformAdapter {
     }
 
     // ── non-strict 模式：收集 score>0 候选，优先 domain 命中 ──
-    let domainOnly = null; // score 1，域名命中（标题未中）
+    const domainOnlyCandidates = []; // score 1，域名命中（标题未中）
     let titleOnlyHit = null; // score 1，标题命中（域名未中，风险高）
     for (let i = 0; i < slice.length; i += 1) {
       const title = (slice[i] && slice[i].title) || '';
@@ -231,16 +245,23 @@ class PlatformAdapter {
         return { href: resolvedList[i], score: 2, reason: 'title+domain' };
       }
       // 仅域名命中（标题未包含关键词）：URL 已验证命中目标域名，可安全兜底
-      if (hrefOk && !domainOnly) {
-        domainOnly = { href: resolvedList[i], score: 1, reason: 'domain-only' };
+      if (hrefOk) {
+        domainOnlyCandidates.push({ href: resolvedList[i], score: 1, reason: 'domain-only' });
       }
       // 仅标题命中（域名未匹配）：URL 未经验证、风险高，默认关闭
       if (titleOnly && titleOk && !titleOnlyHit) {
         titleOnlyHit = { href: resolvedList[i], score: 1, reason: 'title-only' };
       }
     }
-    // domain-only 置于 title-only 之上（前者已验证命中目标域名）
-    if (domainOnly) return domainOnly;
+    // domain-only 兜底：多个同域候选时优先「官网首页（路径最短）」，
+    // 避免点进深层页面（如 /news/123）被误判为「点错目标」。
+    if (domainOnlyCandidates.length) {
+      domainOnlyCandidates.sort(
+        (a, b) => _pathDepth(a.href) - _pathDepth(b.href)
+      );
+      return domainOnlyCandidates[0];
+    }
+    // title-only 置于 domain-only 之上（前者未验证域名、风险高，默认关闭）
     if (titleOnlyHit) return titleOnlyHit;
     return null;
   }

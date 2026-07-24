@@ -327,7 +327,9 @@ async function runPhased(config, emit, deps) {
           attempts: 1, retriesUsed: 0,
           startedAt: new Date(gT0).toISOString(), endedAt: new Date(gT1).toISOString(),
           durationMs: Math.max(0, gT1 - gT0),
-          error: st === TaskStatus.COMPLETED ? null : String(st),
+          error: st === TaskStatus.COMPLETED
+            ? null
+            : (engine && engine.lastErrorDetail ? engine.lastErrorDetail : String(st)),
         });
         finalStatus = worstStatus(finalStatus, st);
         if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) {
