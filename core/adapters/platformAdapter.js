@@ -87,9 +87,10 @@ class PlatformAdapter {
    * 在结果页中双匹配定位目标站点，返回其真实 href；未命中返回 null。
    * @param {import('playwright').Page} page
    * @param {{domain:string,titleKeywords:string[]}} target
+   * @param {{maxResultPages?:number}} [options] 最多扫描的结果页数（含首页），缺省由子类兜底
    * @returns {Promise<string|null>}
    */
-  async locateTarget(page, target) {
+  async locateTarget(page, target, options) {
     throw new Error('locateTarget() 未实现');
   }
 

@@ -480,8 +480,10 @@ class TaskEngine {
       if (roundSuccess) {
         const locateStep = await this._runStep(StepName.LOCATE, async () => {
           const adapter = this.adapters[plan.platform];
-          href = await adapter.locateTarget(page, this.config.target);
-          if (!href) throw new Error('结果页前 10 条未命中目标站点');
+          href = await adapter.locateTarget(page, this.config.target, {
+            maxResultPages: this.config.strategy.maxResultPages,
+          });
+          if (!href) throw new Error('结果页未命中目标站点');
         });
         this.emit(P.makeProgress({ taskId, type: EventType.STEP, round, step: locateStep, stats: this._makeStats() }));
         if (locateStep.status === StepStatus.FAILED) {

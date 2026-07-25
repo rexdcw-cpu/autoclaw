@@ -533,3 +533,45 @@ test('locateTarget(): 2026 new SERP structure (a[data-ved] + [role="heading]) ma
   const triedNew = calls.$$.some(function (s) { return s.includes('a[data-ved]'); });
   assert.ok(triedNew, 'should try new a[data-ved] selector first');
 });
+
+test('locateTarget(): options.maxResultPages caps scanning (target on page 3, limit 2 → not reached)', async () => {
+  const adapter = new GoogleAdapter();
+  const pages = [
+    { anchors: [makeAnchor('无关A', 'https://a.example.com/')], nextHref: '/search?q=x&start=10' },
+    { anchors: [makeAnchor('无关B', 'https://b.example.com/')], nextHref: '/search?q=x&start=20' },
+    { anchors: [makeAnchor('万年移民局官网首页', 'https://www.manincorp.cn/')], nextHref: null },
+  ];
+  const { page, calls } = makeGooglePage({ pages });
+
+  await assert.rejects(
+    () => adapter.locateTarget(
+      page,
+      { domain: 'manincorp.cn', titleKeywords: ['万年移民'] },
+      { maxResultPages: 2 }
+    ),
+    /已扫描的 2 页/,
+    'limit=2 should stop after scanning 2 pages, never reaching page 3'
+  );
+  // 不应导航到 start=20（第 3 页）
+  assert.ok(
+    !calls.goto.some((g) => typeof g.url === 'string' && /[?&]start=20/.test(g.url)),
+    'should NOT navigate to page 3 when maxResultPages=2'
+  );
+});
+
+test('locateTarget(): options.maxResultPages=3 finds target on page 3', async () => {
+  const adapter = new GoogleAdapter();
+  const pages = [
+    { anchors: [makeAnchor('无关A', 'https://a.example.com/')], nextHref: '/search?q=x&start=10' },
+    { anchors: [makeAnchor('无关B', 'https://b.example.com/')], nextHref: '/search?q=x&start=20' },
+    { anchors: [makeAnchor('万年移民局官网首页', 'https://www.manincorp.cn/')], nextHref: null },
+  ];
+  const { page } = makeGooglePage({ pages });
+
+  const href = await adapter.locateTarget(
+    page,
+    { domain: 'manincorp.cn', titleKeywords: ['万年移民'] },
+    { maxResultPages: 3 }
+  );
+  assert.strictEqual(href, 'https://www.manincorp.cn/', 'limit=3 should follow pagination to page 3 and match');
+});

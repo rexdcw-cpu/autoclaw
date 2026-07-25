@@ -601,12 +601,12 @@ test('QA locateTarget(): resolves baidu /link?url= via resolveFinalUrl when no m
   PlatformAdapter.resolveFinalUrl = original;
 });
 
-test('QA locateTarget(): only scans the top 10 results (item #11 ignored -> diagnostic)', async () => {
+test('QA locateTarget(): scans ALL results on page 1 (item #11 now matched, not ignored)', async () => {
   const adapter = new BaiduAdapter();
   const original = PlatformAdapter.resolveFinalUrl;
   PlatformAdapter.resolveFinalUrl = async (href) => href;
 
-  // 12 items; the 11th would match but must be ignored (slice(0,10)).
+  // 12 items; the 11th matches and must now be considered (no slice(0,10) cap).
   const matching = { textContent: () => 'Example Official', getAttribute: () => 'https://example.com/p' };
   const items = [];
   for (let i = 0; i < 12; i++) {
@@ -619,11 +619,8 @@ test('QA locateTarget(): only scans the top 10 results (item #11 ignored -> diag
   const page = buildLocateHarness(items);
 
   try {
-    await assert.rejects(
-      () => adapter.locateTarget(page, { domain: 'example.com', titleKeywords: ['Example'] }),
-      /目标域名「example.com」未出现/,
-      'item beyond top 10 must not be considered -> diagnostic throw'
-    );
+    const result = await adapter.locateTarget(page, { domain: 'example.com', titleKeywords: ['Example'] });
+    assert.strictEqual(result, 'https://example.com/p', 'item #11 must be considered and matched');
   } finally {
     PlatformAdapter.resolveFinalUrl = original;
   }

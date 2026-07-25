@@ -51,6 +51,9 @@ const DEFAULT_STRATEGY = {
   // 注：baiduAdapter.search() 步骤 D 会在提交后轮询等待结果/验证码（上限 120000ms），
   // 外层需留足余量，否则 search 会在 30s 被 withTimeout 提前干掉、永远到不了验证码轮询逻辑。
   actionTimeoutMs: num(process.env.AUTOCLAW_ACTION_TIMEOUT, 150000),
+  // 定位目标时最多扫描的搜索结果页数（含首页）。目标若排在很靠后，逐页扫描到此
+  // 上限即停，避免无限翻页拖慢任务。前端可配置，缺省 5 页。
+  maxResultPages: num(process.env.AUTOCLAW_MAX_RESULT_PAGES, 5),
 };
 
 /**

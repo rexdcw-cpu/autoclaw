@@ -45,8 +45,12 @@
               <label for="browseAnchor">目标页面锚点 browseAnchor（站内浏览寻找的页，默认：关于我们）</label>
               <input type="text" id="browseAnchor" name="browseAnchor" placeholder="关于我们" value="关于我们" />
             </div>
+            <div class="col">
+              <label for="maxResultPages">扫描结果页数 maxResultPages（含首页，默认 5）</label>
+              <input type="number" id="maxResultPages" name="maxResultPages" min="1" max="20" step="1" placeholder="5" value="5" />
+            </div>
           </div>
-          <small class="hint">双匹配规则：结果标题含任一标题关键词，且真实地址含目标域名，取前 10 条首个命中。browseAnchor 用于站内浏览时寻找「关于/联系」类页面，可按站点实际文案填写（如「关于万年」）。</small>
+          <small class="hint">双匹配规则：结果标题含任一标题关键词，且真实地址含目标域名，取首个命中。百度/谷歌各自扫描最多「扫描结果页数」页结果（默认 5 页，逐页翻找，命中即停）。browseAnchor 用于站内浏览时寻找「关于/联系」类页面，可按站点实际文案填写（如「关于万年」）。</small>
         </fieldset>
 
         <!-- 拟人参数 -->

@@ -4,6 +4,23 @@
 
 ---
 
+## [0.3.30] — 2026-07-25
+
+### Added
+- **「扫描结果页数」成为任务配置项（默认 5）**：百度与谷歌各自最多扫描 N 页搜索结果
+  （含首页）逐页翻找定位目标，命中即停。原来谷歌硬编码上限 5 页、百度仅扫首页前 10 条且不翻页；
+  现统一由`strategy.maxResultPages`驱动，前端表单可填（1–20，默认 5），亦可用环境变量
+  `AUTOCLAW_MAX_RESULT_PAGES` 覆盖。
+- **百度适配器补齐翻页能力**：`locateTarget` 改写为主流「扫全页 + 翻页 + 诊断」结构，与谷歌对齐；
+  新增 `_findNextPageUrl`（百度 `#page` 分页容器，取「下一页」/带 `pn=` 的链接），未命中时给出
+  "已扫描 N 页"的可操作诊断。百度、谷歌仍各自使用独立脚本与选择器，互不混用。
+
+### Changed
+- `locateTarget(page, target, options)` 基类签名新增 `options.maxResultPages` 形参；
+  `taskEngine` 透传 `config.strategy.maxResultPages`；历史下钻错误文案"前 10 条"改为"已扫描 N 页"。
+
+---
+
 ## [0.3.29] — 2026-07-25
 
 ### Fixed

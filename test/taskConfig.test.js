@@ -223,6 +223,21 @@ test('valid config carries anthropic + strategy defaults', () => {
   assert.strictEqual(cfg.strategy.mode, 'serial');
 });
 
+test('strategy.maxResultPages defaults to 5 when omitted', () => {
+  const cfg = buildTaskConfig(validPayload());
+  assert.strictEqual(cfg.strategy.maxResultPages, 5, '默认扫描 5 页结果');
+});
+
+test('strategy.maxResultPages honored when provided', () => {
+  const cfg = buildTaskConfig(validPayload({ strategy: { maxResultPages: 12 } }));
+  assert.strictEqual(cfg.strategy.maxResultPages, 12, '应采纳提交值 12');
+});
+
+test('strategy.maxResultPages ignored when non-numeric (falls back to 5)', () => {
+  const cfg = buildTaskConfig(validPayload({ strategy: { maxResultPages: 'abc' } }));
+  assert.strictEqual(cfg.strategy.maxResultPages, 5, '非法值应回退默认');
+});
+
 // ---------------------------------------------------------------------------
 // Proxy normalization (F-18 入口落地)
 // ---------------------------------------------------------------------------

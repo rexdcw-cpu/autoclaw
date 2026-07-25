@@ -432,3 +432,111 @@ test('open(): captcha detected immediately, does NOT wait #kw 15s before polling
   await adapter.open(page);
   assert.strictEqual(enteredPoll, true, 'should enter captcha poll (warn) instead of waiting #kw 15s');
 });
+
+// ---------------------------------------------------------------------------
+// locateTarget() — 翻页扫描（options.maxResultPages）
+// ---------------------------------------------------------------------------
+
+/**
+ * 自带分页支持的假 page：pages = [{ items:[{title,href,mu}], nextHref }, ...]。
+ * 百度适配器内部选择器（RESULT_CONTAINER / TITLE_LINK）由适配器用常量传入，
+ * 本 mock 的 page.$$ 仅对该常量选择器返回当前页 items；_findNextPageUrl 用
+ * document.querySelector('#page') 取下一页链接。mu 已声明真实地址 → 不触发网络解析。
+ */
+function makeBaiduPaginatedPage(pages) {
+  const RESULT_CONTAINER = '#content_left .result, #content_left .c-container';
+  const TITLE_LINK = 'h3 a';
+  let idx = 0;
+  const cur = () => pages[idx] || { items: [], nextHref: null };
+  const FakeEvent = function () {};
+
+  function makeItem(it) {
+    return {
+      async $(sel) {
+        if (sel === TITLE_LINK) {
+          return {
+            textContent: async () => it.title,
+            getAttribute: async (n) => (n === 'href' ? it.href : ''),
+          };
+        }
+        return null;
+      },
+      async getAttribute(n) {
+        if (n === 'mu') return it.mu || '';
+        if (n === 'data-url') return it.dataUrl || '';
+        return '';
+      },
+    };
+  }
+
+  const nextLink = () => {
+    const np = cur().nextHref;
+    if (!np) return [];
+    return [{ textContent: '下一页', getAttribute: (n) => (n === 'href' ? np : n === 'aria-label' ? 'Next' : '') }];
+  };
+  const pageBox = { querySelectorAll: () => nextLink() };
+  const document = {
+    querySelector: (sel) => (sel === '#page' ? pageBox : null),
+  };
+
+  const page = {
+    url: () => 'https://www.baidu.com/s?wd=x' + (idx > 0 ? '&pn=' + idx * 10 : ''),
+    title: async () => '百度一下，你就知道',
+    async $$(sel) {
+      if (sel === RESULT_CONTAINER) return cur().items.map(makeItem);
+      return [];
+    },
+    async goto(url) {
+      if (typeof url === 'string' && /[?&]pn=\d+/.test(url) && idx < pages.length - 1) idx += 1;
+    },
+    async waitForSelector() {
+      return {};
+    },
+    async evaluate(fn) {
+      const runner = new Function('document', 'window', 'Event', 'arg', 'return (' + fn.toString() + ')(arg);');
+      return runner(document, {}, FakeEvent, undefined);
+    },
+  };
+
+  return { page, getIdx: () => idx };
+}
+
+test('locateTarget(): Baidu follows 下一页 and matches target on page 2 (default 5 pages)', async () => {
+  const adapter = new BaiduAdapter();
+  const { page } = makeBaiduPaginatedPage([
+    { items: [{ title: '无关A', href: 'https://a.example.com/', mu: 'https://a.example.com/' }], nextHref: '/s?wd=x&pn=10' },
+    { items: [{ title: '万年移民局官网首页', href: 'https://www.manincorp.cn/', mu: 'https://www.manincorp.cn/' }], nextHref: null },
+  ]);
+
+  const href = await adapter.locateTarget(page, { domain: 'manincorp.cn', titleKeywords: ['万年移民'] });
+  assert.strictEqual(href, 'https://www.manincorp.cn/', 'should paginate to page 2 and match');
+});
+
+test('locateTarget(): Baidu options.maxResultPages caps scanning (target on page 3, limit 2 → not reached)', async () => {
+  const adapter = new BaiduAdapter();
+  const pages = [
+    { items: [{ title: '无关A', href: 'https://a.example.com/', mu: 'https://a.example.com/' }], nextHref: '/s?wd=x&pn=10' },
+    { items: [{ title: '无关B', href: 'https://b.example.com/', mu: 'https://b.example.com/' }], nextHref: '/s?wd=x&pn=20' },
+    { items: [{ title: '万年移民局官网首页', href: 'https://www.manincorp.cn/', mu: 'https://www.manincorp.cn/' }], nextHref: null },
+  ];
+  const { page } = makeBaiduPaginatedPage(pages);
+
+  await assert.rejects(
+    () => adapter.locateTarget(page, { domain: 'manincorp.cn', titleKeywords: ['万年移民'] }, { maxResultPages: 2 }),
+    /已扫描的 2 页/,
+    'limit=2 should stop after 2 pages, never reaching page 3'
+  );
+});
+
+test('locateTarget(): Baidu scans ALL results on a page (target beyond top 10 still matches)', async () => {
+  const adapter = new BaiduAdapter();
+  const items = [];
+  for (let i = 0; i < 12; i += 1) {
+    items.push({ title: '无关结果' + i, href: 'https://x' + i + '.example.com/', mu: 'https://x' + i + '.example.com/' });
+  }
+  items.push({ title: '万年移民局官网首页', href: 'https://www.manincorp.cn/', mu: 'https://www.manincorp.cn/' }); // 第 13 条
+  const { page } = makeBaiduPaginatedPage([{ items, nextHref: null }]);
+
+  const href = await adapter.locateTarget(page, { domain: 'manincorp.cn', titleKeywords: ['万年移民'] });
+  assert.strictEqual(href, 'https://www.manincorp.cn/', 'should match even though target is beyond top 10');
+});

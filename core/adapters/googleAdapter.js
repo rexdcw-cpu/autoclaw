@@ -84,8 +84,8 @@ const CAPTCHA_POLL_INTERVAL = 2000;
 const CONSENT_LEAVE_MS = 15000;
 
 /**
- * 定位目标时最多扫描的搜索结果页数（含首页）。目标若排在很靠后，逐页扫描到
- * 此上限即停，避免无限翻页拖慢任务。
+ * 定位目标时最多扫描的搜索结果页数（含首页）的硬编码兜底值。
+ * 前端/配置可经 locateTarget(page, target, { maxResultPages }) 覆盖，缺省取本值（5）。
  */
 const MAX_RESULT_PAGES = 5;
 
@@ -520,7 +520,7 @@ class GoogleAdapter extends PlatformAdapter {
   }
 
   /** 结果页双匹配定位目标站点（扫描本页全部结果 + 翻页；精准取标题主链接 + 复用基类 matchTarget + 诊断） */
-  async locateTarget(page, target) {
+  async locateTarget(page, target, options = {}) {
     // 二次保险：落在验证码 / 同意页时结果容器不存在，提前抛出明确错误
     if (await this._isCaptchaPage(page)) {
       throw new Error(
@@ -534,7 +534,13 @@ class GoogleAdapter extends PlatformAdapter {
     const allParsed = []; // 跨页累计，仅用于诊断
     let scannedPages = 0;
 
-    for (let p = 1; p <= MAX_RESULT_PAGES; p += 1) {
+    // 扫描页数上限：优先用配置（options.maxResultPages），否则回退硬编码 5 页。
+    const maxPages =
+      options && Number.isFinite(options.maxResultPages) && options.maxResultPages > 0
+        ? options.maxResultPages
+        : MAX_RESULT_PAGES;
+
+    for (let p = 1; p <= maxPages; p += 1) {
       // 触发懒加载：滚到底，让 Google 追加本页靠后的结果块（位置 11 及之后）
       await this._scrollToBottom(page);
 
@@ -551,9 +557,9 @@ class GoogleAdapter extends PlatformAdapter {
       });
       if (match) return match.href;
 
-      // 本页未命中 → 找「下一页」继续；无下一页则停止翻页
+      // 本页未命中 → 找「下一页」继续；无下一页或已到扫描上限则停止翻页
       const nextHref = await this._findNextPageUrl(page);
-      if (!nextHref) break;
+      if (!nextHref || p >= maxPages) break;
       const nextUrl = /^https?:/i.test(nextHref)
         ? nextHref
         : new URL(nextHref, page.url()).toString();

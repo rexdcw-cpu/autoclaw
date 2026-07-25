@@ -72,6 +72,12 @@ const STEP_TIMEOUT = {
 const CAPTCHA_WAIT_MS = 120000;
 const CAPTCHA_POLL_INTERVAL = 2000;
 
+/**
+ * 定位目标时最多扫描的搜索结果页数（含首页）的硬编码兜底值。
+ * 前端/配置可经 locateTarget(page, target, { maxResultPages }) 覆盖，缺省取本值（5）。
+ */
+const MAX_RESULT_PAGES = 5;
+
 class BaiduAdapter extends PlatformAdapter {
   constructor() {
     super('baidu');
@@ -271,8 +277,33 @@ class BaiduAdapter extends PlatformAdapter {
     }
   }
 
-  /** 结果页双匹配定位目标站点 */
-  async locateTarget(page, target) {
+  /**
+   * 在结果页内查找「下一页」链接的真实地址（百度：#page 分页容器内，优先取文本含
+   * 「下一页/Next」的链接，回退到带 pn= 的最后一个链接）。找不到返回 null。
+   * @param {import('playwright').Page} page
+   * @returns {Promise<string|null>}
+   */
+  async _findNextPageUrl(page) {
+    try {
+      return await page.evaluate(() => {
+        const pageBox = document.querySelector('#page');
+        if (!pageBox) return null;
+        const links = Array.from(pageBox.querySelectorAll('a'));
+        const next = links.find((a) =>
+          /下一页|next/i.test((a.textContent || '') + ' ' + (a.getAttribute('aria-label') || ''))
+        );
+        if (next && next.getAttribute('href')) return next.getAttribute('href');
+        // 回退：带 pn= 的最后一个链接（百度分页用 pn 偏移，下一页 pn 更大）
+        const pnLinks = links.filter((a) => /[?&]pn=\d+/.test(a.getAttribute('href') || ''));
+        return pnLinks.length ? pnLinks[pnLinks.length - 1].getAttribute('href') : null;
+      });
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 结果页双匹配定位目标站点（扫描本页全部结果 + 翻页；每页全部结果参与双匹配 + 诊断） */
+  async locateTarget(page, target, options = {}) {
     // 二次保险：若已落在安全验证页，结果容器不存在，提前抛出明确错误
     if (await this._isCaptchaPage(page)) {
       throw new Error(
@@ -280,8 +311,14 @@ class BaiduAdapter extends PlatformAdapter {
       );
     }
 
-    const items = await page.$$(RESULT_CONTAINER);
-    const top = items.slice(0, 10);
+    // 扫描页数上限：优先用配置（options.maxResultPages），否则回退硬编码 5 页。
+    const maxPages =
+      options && Number.isFinite(options.maxResultPages) && options.maxResultPages > 0
+        ? options.maxResultPages
+        : MAX_RESULT_PAGES;
+
+    const allParsed = []; // 跨页累计，仅用于诊断
+    let scannedPages = 0;
 
     // 安全读取元素属性（部分 mock 元素可能未实现 getAttribute）
     const safeAttr = async (el, name) => {
@@ -293,55 +330,87 @@ class BaiduAdapter extends PlatformAdapter {
       return '';
     };
 
-    // 解析为 {title, href, realUrl}：优先容器声明的真实 URL（mu / data-url，
-    // 百度 c-container 通常带 mu="<真实目标URL>"），拿不到再退回
-    // resolveFinalUrl 解析跳转链接（baidu.com/link?url=）。
-    const parsed = [];
-    for (const item of top) {
-      const a = await item.$(TITLE_LINK);
-      if (!a) continue;
-      const title = ((await a.textContent()) || '').toString();
-      const href = (await safeAttr(a, 'href')) || '';
-      const mu = (await safeAttr(item, 'mu')) || '';
-      const dataUrl = (await safeAttr(item, 'data-url')) || '';
-      const realUrl = mu || dataUrl;
-      parsed.push({ title, href, realUrl });
+    for (let p = 1; p <= maxPages; p += 1) {
+      // 解析本页【全部】结果（不限定前 10 条）：优先容器声明的真实 URL
+      // （mu / data-url，百度 c-container 通常带 mu="<真实目标URL>"），拿不到再退回
+      // resolveFinalUrl 解析跳转链接（baidu.com/link?url=）。
+      const items = await page.$$(RESULT_CONTAINER);
+      const parsed = [];
+      for (const item of items) {
+        const a = await item.$(TITLE_LINK);
+        if (!a) continue;
+        const title = ((await a.textContent()) || '').toString();
+        const href = (await safeAttr(a, 'href')) || '';
+        const mu = (await safeAttr(item, 'mu')) || '';
+        const dataUrl = (await safeAttr(item, 'data-url')) || '';
+        const realUrl = mu || dataUrl;
+        parsed.push({ title, href, realUrl });
+      }
+
+      // 并行解析全部候选的真实 URL：容器已声明 mu/data-url 则直接采用（免网络），
+      // 否则用 resolveFinalUrl 解析百度跳转链接。用于匹配与失败诊断。
+      const resolvedList = await Promise.all(
+        parsed.map((it) =>
+          it.realUrl && /^https?:\/\//i.test(it.realUrl)
+            ? Promise.resolve(it.realUrl)
+            : PlatformAdapter.resolveFinalUrl(it.href, 3000)
+        )
+      );
+      const itemsForMatch = parsed.map((it, i) => ({ title: it.title, href: resolvedList[i] }));
+
+      // 调用纯函数做匹配：non-strict 下启用 domain-only 兜底（标题未命中关键词
+      // 但域名命中，典型如站点标题「万年县移民局」vs 关键词「万年移民」）。
+      // 已解析好的真实 URL 直接喂入，resolve 恒等，避免重复网络解析。
+      scannedPages += 1;
+      allParsed.push(...itemsForMatch);
+      const match = await PlatformAdapter.matchTarget(itemsForMatch, target, {
+        resolve: (h) => h,
+        max: itemsForMatch.length,
+        strict: false,
+      });
+      if (match) return match.href;
+
+      // 本页未命中 → 找「下一页」继续；无下一页或已到扫描上限则停止翻页
+      const nextHref = await this._findNextPageUrl(page);
+      if (!nextHref || p >= maxPages) break;
+      const nextUrl = /^https?:/i.test(nextHref)
+        ? nextHref
+        : new URL(nextHref, page.url()).toString();
+      await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page
+        .waitForSelector('#content_left', { state: 'visible', timeout: 15000 })
+        .catch(() => {});
     }
 
-    // 并行解析全部候选的真实 URL：容器已声明 mu/data-url 则直接采用（免网络），
-    // 否则用 resolveFinalUrl 解析百度跳转链接。用于匹配与失败诊断。
-    const resolvedList = await Promise.all(
-      parsed.map((it) =>
-        it.realUrl && /^https?:\/\//i.test(it.realUrl)
-          ? Promise.resolve(it.realUrl)
-          : PlatformAdapter.resolveFinalUrl(it.href, 3000)
-      )
-    );
-    const itemsForMatch = parsed.map((it, i) => ({ title: it.title, href: resolvedList[i] }));
-
-    // 调用纯函数做匹配：non-strict 下启用 domain-only 兜底（标题未命中关键词
-    // 但域名命中，典型如站点标题「万年县移民局」vs 关键词「万年移民」）。
-    // 已解析好的真实 URL 直接喂入，resolve 恒等，避免重复网络解析。
-    const match = await PlatformAdapter.matchTarget(itemsForMatch, target, {
-      resolve: (h) => h,
-      max: 10,
-      strict: false,
-    });
-
-    if (match) return match.href;
-
     // ── 诊断：给出可操作的失败原因，便于快速区分两类问题 ──
-    const anyDomain = resolvedList.some((u) => PlatformAdapter.matchHref(u, target.domain));
+    const seenDomains = [
+      ...new Set(
+        allParsed
+          .map((it) => {
+            try {
+              return new URL(it.href).hostname;
+            } catch (e) {
+              return null;
+            }
+          })
+          .filter(Boolean)
+      ),
+    ];
+    const anyDomain = allParsed.some((it) => PlatformAdapter.matchHref(it.href, target.domain));
     if (!anyDomain) {
+      const seenPart = seenDomains.length
+        ? `。已扫描 ${scannedPages} 页实际看到的域名（前 20）：${seenDomains.slice(0, 20).join('、')}`
+        : `（${scannedPages} 页均未解析到任何外链，可能结果页结构变化或命中拦截页）`;
       throw new Error(
-        `[locateTarget] 目标域名「${target.domain}」未出现在前 10 条结果中` +
-          `（可能目标站点未真正进入当前关键词的搜索排名）。建议：更换更精准的搜索关键词、` +
-          `或更换/确认目标域名后重试。`
+        `[locateTarget] 目标域名「${target.domain}」未出现在已扫描的 ${scannedPages} 页搜索结果中` +
+          seenPart +
+          `。可能该站点未真正进入当前节点此关键词的搜索排名；建议：更换更精准的搜索关键词、` +
+          `或换/确认目标域名后重试。`
       );
     }
     // 防御性分支：domain-only 兜底已覆盖「域名在但标题未中」的情形，正常不会到达此处。
     throw new Error(
-      `[locateTarget] 前 10 条结果中存在目标域名「${target.domain}」的条目，` +
+      `[locateTarget] 已扫描 ${scannedPages} 页结果中存在目标域名「${target.domain}」的条目，` +
         `但其标题均未命中关键词（${target.titleKeywords.join('、')}）。` +
         `可尝试启用 title-only 兜底或更换更贴合站点标题的关键词。`
     );

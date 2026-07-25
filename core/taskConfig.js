@@ -192,7 +192,7 @@ function sanitizeStrategy(raw) {
   const out = {};
   if (!raw || typeof raw !== 'object') return out;
   if (typeof raw.mode === 'string') out.mode = raw.mode;
-  const nums = ['failRateThreshold', 'maxRetry', 'actionTimeoutMs'];
+  const nums = ['failRateThreshold', 'maxRetry', 'actionTimeoutMs', 'maxResultPages'];
   for (const k of nums) {
     const v = Number(raw[k]);
     if (Number.isFinite(v) && raw[k] !== '' && raw[k] != null) out[k] = v;

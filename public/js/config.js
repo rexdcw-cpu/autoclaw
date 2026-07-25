@@ -130,6 +130,9 @@
     var mode = document.getElementById('mode').value;
     var clientId = document.getElementById('clientId').value.trim();
 
+    // 扫描结果页数（含首页），有值才覆盖默认值 5
+    var maxResultPages = numOrNull('maxResultPages');
+
     var proxyEl = document.getElementById('proxy-url');
     var proxyVal = proxyEl ? proxyEl.value.trim() : '';
     var proxy = proxyVal ? proxyVal : null;
@@ -145,7 +148,7 @@
       browseAnchor: browseAnchor,
       anthropic: anthropic,
       humanize: humanize,
-      strategy: { mode: mode },
+      strategy: { mode: mode, maxResultPages: maxResultPages },
       proxy: proxy,
     };
     if (clientId) payload.clientId = clientId;
@@ -251,6 +254,8 @@
     if (hz.minMs != null) { var mn = document.getElementById('humanize-min'); if (mn) mn.value = hz.minMs; }
     if (hz.maxMs != null) { var mx = document.getElementById('humanize-max'); if (mx) mx.value = hz.maxMs; }
     if (item.runMode) { var m = document.getElementById('mode'); if (m) m.value = item.runMode; }
+    var st = item.strategy || {};
+    if (st.maxResultPages != null) { var mr = document.getElementById('maxResultPages'); if (mr) mr.value = st.maxResultPages; }
     var cb = document.getElementById('clientId');
     if (cb) cb.value = item.clientId || '';
     var pe = document.getElementById('proxy-url');
