@@ -115,6 +115,13 @@ class TaskEngine {
     // 本轮运行中最具诊断价值的失败原因（首个失败硬步骤的 detail，含真实异常文案）。
     // worker 在 eng.run() 后读取，写入 task-stats 的 perWifi.error，避免只记笼统 "failed"。
     this.lastErrorDetail = null;
+
+    // 本轮是否真正「找到并进入目标站」（SEO 关键成功信号）。
+    // 仅看 status=completed 无法区分「流程没崩但没找到目标」与「真的点到目标」，
+    // 故单独记录，供 worker 写入 task-stats 的 perWifi.found / landedUrl。
+    this.foundTarget = false; // LOCATE 阶段命中目标域名+标题双匹配
+    this.landedUrl = null; // ENTER 阶段实际 goto 的真实地址
+    this.enteredTarget = false; // ENTER 阶段成功落地目标站
   }
 
   /** 请求暂停（在下一轮安全点生效） */
@@ -490,6 +497,10 @@ class TaskEngine {
           roundSuccess = false;
           round.error = ERR.ERR_NO_TARGET;
           this.lastErrorDetail = locateStep.detail || String(round.error);
+        } else {
+          // 关键成功信号：LOCATE 命中目标 → 记录命中与真实落地地址
+          this.foundTarget = true;
+          this.landedUrl = href || null;
         }
 
         // 步骤间拟人微动作（locate → enter）
@@ -509,6 +520,9 @@ class TaskEngine {
           roundSuccess = false;
           round.error = ERR.ERR_ADAPTER_FAIL;
           this.lastErrorDetail = enterStep.detail || String(round.error);
+        } else {
+          // 关键成功信号：ENTER 成功落地目标站
+          this.enteredTarget = true;
         }
 
         // 步骤间拟人微动作（enter → stay）

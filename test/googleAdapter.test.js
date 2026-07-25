@@ -103,6 +103,10 @@ function makeGooglePage(opts = {}) {
   const document = {
     querySelector(sel) {
       if (sel === 'textarea[name="q"]') return q;
+    if (sel === 'input[name="btnK"]')
+      return opts.human
+        ? { getBoundingClientRect: () => ({ x: 10, y: 10, width: 80, height: 30 }) }
+        : null;
       if (sel === 'form[action="/search"]' || sel === 'form[role="search"]' || sel === 'form')
         return form;
       // 分页：当前页存在下一页链接时返回带 href 的假锚点
@@ -141,6 +145,33 @@ function makeGooglePage(opts = {}) {
   };
 
   const page = {
+    // 拟人模式：提供真实 focus/keyboard/mouse，用于验证「逐字输入 + 真实鼠标点击」
+    focus: opts.human
+      ? async (sel) => {
+          calls.focus = sel;
+        }
+      : undefined,
+    keyboard: opts.human
+      ? {
+          type: async (text) => {
+            calls.keyboardType = (calls.keyboardType || '') + text;
+            calls.keyboardTypeCalls = (calls.keyboardTypeCalls || 0) + 1;
+          },
+          press: async (k) => {
+            calls.keyboardPress = k;
+          },
+        }
+      : undefined,
+    mouse: opts.human
+      ? {
+          move: async (x, y) => {
+            calls.mouseMove = { x, y };
+          },
+          click: async (x, y) => {
+            calls.mouseClick = { x, y };
+          },
+        }
+      : undefined,
     url: () => {
       calls.url.push(computeUrl());
       return computeUrl();
@@ -323,6 +354,23 @@ test('search(): submits via evaluate (requestSubmit), not press/click API', asyn
   assert.strictEqual(form.submitted, true, 'should call form.requestSubmit()');
   const resultWait = calls.waitForSelector.find((c) => c.sel === '#rso');
   assert.ok(resultWait, 'search should wait for #rso at the end');
+});
+
+test('search(): 拟人模式逐字输入 + 真实鼠标移动并点击搜索按钮（human）', async () => {
+  const adapter = new GoogleAdapter();
+  const { page, calls } = makeGooglePage({ human: true });
+  const keyword = '万年移民';
+
+  await adapter.search(page, keyword);
+
+  // 1) 逐字输入：keyword 经 keyboard.type 累积为完整串，且按字数多次调用（带抖动）
+  assert.strictEqual(calls.keyboardType, keyword, 'should type keyword char-by-char via real keyboard');
+  assert.strictEqual(calls.keyboardTypeCalls, keyword.length, 'should call keyboard.type once per character');
+  assert.strictEqual(calls.focus, 'textarea[name="q"]', 'should focus the search box first');
+  // 2) 提交：先真实鼠标移动 + 点击搜索按钮
+  assert.ok(calls.mouseClick, 'should click the search button via real mouse');
+  assert.ok(calls.mouseMove, 'should move mouse to the search button before clicking');
+  assert.strictEqual(calls.keyboardPress, undefined, 'human path should NOT fall back to Enter press');
 });
 
 test('search(): wraps a failed step A in a step-named error', async () => {

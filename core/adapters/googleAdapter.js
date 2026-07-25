@@ -50,6 +50,17 @@
 
 const { PlatformAdapter } = require('./platformAdapter');
 
+/**
+ * 拟人随机整数 [min, max]，用于打字节奏 / 滚动 / 停顿的抖动。
+ * @param {number} min
+ * @param {number} max
+ * @returns {number}
+ */
+function randInt(min, max) {
+  return Math.floor(min + Math.random() * (max - min + 1));
+}
+
+
 const GOOGLE_HOME = 'https://www.google.com';
 const SEARCH_BOX = 'textarea[name="q"]';
 /**
@@ -108,8 +119,7 @@ const MAX_RESULT_PAGES = 5;
  * @param {string} href
  * @returns {string}
  */
-function _decodeGoogleRedirect(href) {
-  if (!href || typeof href !== 'string') return href;
+function _decodeGoogleRedirect(href) {  if (!href || typeof href !== 'string') return href;
   try {
     // Google 跳转链接的包装参数历史上用 q=，新版部分布局改用 url=，二者都尝试。
     const m = href.match(/[?&](?:q|url)=([^&#]+)/);
@@ -332,47 +342,99 @@ class GoogleAdapter extends PlatformAdapter {
       });
     });
 
-    // 步骤B：填写搜索词（evaluate 写原生 value + 派发 input/change，绕开可见性）。
-    // 注意：谷歌首页搜索框是 <textarea name="q">（不是 <input>），
-    // 必须用「元素自身原型」的 value setter，否则对 textarea 调用
-    // HTMLInputElement.prototype 的 setter 会抛「Illegal invocation」。
+    // 步骤B：拟人逐字输入（真实键盘事件，触发 Google 自动补全与 caret，
+    // 避免一次性赋值被识别为脚本注入）。可见/隐藏异常态时回退 evaluate 原生赋值（健壮性）。
+    // 注意：步骤A 已等待搜索框挂载；此处直接聚焦输入。谷歌首页搜索框是
+    // <textarea name="q">（不是 <input>），evaluate 回退路径必须用「元素自身原型」
+    // 的 value setter，否则对 textarea 调用 HTMLInputElement.prototype 的 setter 会抛「Illegal invocation」。
     await this._withStep('填写搜索词', '填写谷歌搜索词超时', async () => {
-      await page.evaluate((kw) => {
-        const el = document.querySelector('textarea[name="q"]');
-        if (!el) throw new Error('google search box (textarea[name="q"]) not found');
-        const proto = (el.constructor && el.constructor.prototype) || window.HTMLInputElement.prototype;
-        const desc =
-          Object.getOwnPropertyDescriptor(proto, 'value') ||
-          Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-        if (!desc || typeof desc.set !== 'function') {
-          throw new Error('无法获取搜索框 value setter');
+      try {
+        // 真实聚焦 + 逐字输入，每字带随机抖动延迟（40-130ms），模拟真人打字节奏
+        await page.focus(SEARCH_BOX);
+        for (const ch of keyword) {
+          await page.keyboard.type(ch, { delay: randInt(40, 130) });
         }
-        desc.set.call(el, kw);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }, keyword);
+      } catch (e) {
+        // 键盘输入失败（极少数隐藏/异常态）→ 回退原生赋值 + 派发 input/change
+        await page.evaluate((kw) => {
+          const el = document.querySelector('textarea[name="q"]');
+          if (!el) throw new Error('google search box (textarea[name="q"]) not found');
+          const proto =
+            (el.constructor && el.constructor.prototype) || window.HTMLInputElement.prototype;
+          const desc =
+            Object.getOwnPropertyDescriptor(proto, 'value') ||
+            Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+          if (!desc || typeof desc.set !== 'function') {
+            throw new Error('无法获取搜索框 value setter');
+          }
+          desc.set.call(el, kw);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }, keyword);
+      }
+      // 真实「思考」停顿（300-900ms）再提交，避免「打完即点」的机械感
+      await page.waitForTimeout(randInt(300, 900));
     });
 
-    // 步骤C：提交搜索（evaluate 触发 form.requestSubmit，回退点击搜索按钮）
+    // 步骤C：拟人提交搜索——优先真实鼠标移动+点击「谷歌搜索」按钮（最自然），
+    // 其次按 Enter（搜索框已聚焦），最终回退 evaluate 触发 requestSubmit（兜底极端态）。
     await this._withStep('提交搜索', '提交谷歌搜索超时', async () => {
-      await page.evaluate(() => {
-        const form =
-          document.querySelector('form[action="/search"]') ||
-          document.querySelector('form[role="search"]') ||
-          document.querySelector('form');
-        if (form && typeof form.requestSubmit === 'function') {
-          form.requestSubmit();
-          return;
+      let submitted = false;
+
+      // 1) 真实鼠标点击搜索按钮（带移动轨迹，最接近真人）
+      try {
+        const box = await page.evaluate(() => {
+          const btn =
+            document.querySelector('input[name="btnK"]') ||
+            document.querySelector('button[aria-label*="Google 搜索"]') ||
+            document.querySelector('button[aria-label*="Google Search"]') ||
+            document.querySelector('center input[type="submit"]');
+          if (!btn) return null;
+          const r = btn.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) return null;
+          return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+        });
+        if (box) {
+          await page.mouse.move(box.x, box.y, { steps: randInt(6, 14) });
+          await page.waitForTimeout(randInt(80, 220));
+          await page.mouse.click(box.x, box.y);
+          submitted = true;
         }
-        const btn = document.querySelector(
-          'input[name="btnK"], button[aria-label*="Google"], input[value*="Google"]'
-        );
-        if (btn) {
-          btn.click();
-          return;
+      } catch (e) {
+        submitted = false;
+      }
+
+      // 2) 没点到按钮 → 按 Enter（基于已聚焦的搜索框，最自然的提交方式）
+      if (!submitted) {
+        try {
+          await page.keyboard.press('Enter');
+          submitted = true;
+        } catch (e) {
+          submitted = false;
         }
-        throw new Error('google search form/button not found');
-      });
+      }
+
+      // 3) 兜底：evaluate 触发 requestSubmit（覆盖极端态）
+      if (!submitted) {
+        await page.evaluate(() => {
+          const form =
+            document.querySelector('form[action="/search"]') ||
+            document.querySelector('form[role="search"]') ||
+            document.querySelector('form');
+          if (form && typeof form.requestSubmit === 'function') {
+            form.requestSubmit();
+            return;
+          }
+          const btn = document.querySelector(
+            'input[name="btnK"], button[aria-label*="Google"], input[value*="Google"]'
+          );
+          if (btn) {
+            btn.click();
+            return;
+          }
+          throw new Error('google search form/button not found');
+        });
+      }
     });
 
     // 步骤D（轮询）：提交后可能落到同意页 / 异常流量验证码页，或结果仍在加载。
@@ -408,17 +470,28 @@ class GoogleAdapter extends PlatformAdapter {
   }
 
   /**
-   * 滚到页面底部，触发 Google 的「懒加载更多结果」；包裹 try/catch 容错。
+   * 渐进式滚到页面底部，触发 Google 的「懒加载更多结果」；包裹 try/catch 容错。
+   * 分 3-6 段、每段间 150-400ms 停顿，模拟真人分段下滚，而非一次性瞬移到底。
    * Google 在滚动到底部时会追加本页靠后的结果块（位置 11 及之后），
    * 这正是「正确页面在页面最低端」却被旧版限制在前 10 条而漏匹配的根因。
    * @param {import('playwright').Page} page
    */
   async _scrollToBottom(page) {
     try {
+      const steps = randInt(3, 6);
+      for (let i = 0; i < steps; i += 1) {
+        await page.evaluate((frac) => {
+          const h = (document.body && document.body.scrollHeight) || 0;
+          window.scrollTo(0, Math.round(h * frac));
+        }, (i + 1) / steps);
+        await page.waitForTimeout(randInt(150, 400));
+      }
+      // 最后滚到真正底部，确保懒加载触发
       await page.evaluate(() => {
-        window.scrollTo(0, document.body.scrollHeight);
+        const h = (document.body && document.body.scrollHeight) || 0;
+        window.scrollTo(0, h);
       });
-      await page.waitForTimeout(800); // 等待懒加载追加的结果块挂载
+      await page.waitForTimeout(randInt(600, 1100)); // 等待懒加载追加的结果块挂载
     } catch (e) {
       /* 滚动失败不致命：沿用已渲染的结果 */
     }

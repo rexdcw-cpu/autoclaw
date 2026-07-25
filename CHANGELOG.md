@@ -4,7 +4,29 @@
 
 ---
 
-## [0.3.30] — 2026-07-25
+## [0.3.31] — 2026-07-25
+
+### Changed（谷歌拟人化 + 反检测，避免触发机器人验证）
+- **谷歌搜索改为真人操作**：
+  - 搜索词由「一次性赋值」改为**逐字键盘输入**（`page.keyboard.type`，每字 40–130ms 随机抖动），
+    触发 Google 自动补全与 caret，避免脚本注入特征；隐藏/异常态自动回退到原生 `value` 赋值（兼容旧健壮性）。
+  - 提交由「`form.requestSubmit()`」改为**真实鼠标移动 + 点击「谷歌搜索」按钮**（找不到按钮则回车，
+    最终回退 requestSubmit），消除机械提交特征。
+  - 输入后加入 300–900ms「思考」停顿，避免「打完即点」。
+  - 结果页滚动由「瞬移到底」改为**分段渐进下滚**（3–6 段、每段 150–400ms 停顿），更像真人浏览。
+- **浏览器反检测强化**（`core/browserSession.js`）：
+  - 移除 Playwright 自动化开关 `ignoreDefaultArgs:['--enable-automation']`；
+  - 注入 `addInitScript` 抹除 `navigator.webdriver` 并统一 `navigator.languages`；
+  - UA 改为近期真实 Chrome/Win **随机池**，视口轻微抖动，降低跨任务指纹关联。
+
+### Added（SEO 成功可观测）
+- 任务统计新增「**是否命中目标**」信号：`perWifi.found` / `landedUrl`、`summary.foundWifi` /
+  `foundRate`，Markdown 明细表增「命中目标」列（✅ / ⚠️未命中）。
+  解决原 `status=completed` 仅代表「流程没崩」、无法区分「真点到目标」与「没找到目标」的盲区。
+
+### Tests
+- 新增谷歌 `search()` 拟人路径单测（逐字输入 + 真实鼠标点击搜索按钮）。
+
 
 ### Added
 - **「扫描结果页数」成为任务配置项（默认 5）**：百度与谷歌各自最多扫描 N 页搜索结果

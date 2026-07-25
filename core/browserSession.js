@@ -21,6 +21,31 @@ const { execSync } = require('child_process');
 const { chromium } = require('playwright');
 const { ERR } = require('./progressEvent');
 
+/**
+ * 拟真 UA 池（近期 Windows + 真实 Chrome 版本），每次启动随机取一个，
+ * 避免所有任务固定同一个 UA 被关联。与下方 viewport 抖动共同降低指纹稳定性。
+ */
+const REALISTIC_UA_POOL = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+];
+
+/** 反检测初始化脚本：抹除 navigator.webdriver 痕迹，并统一 navigator.languages（与 UA 一致） */
+const ANTI_DETECT_INIT_SCRIPT = function () {
+  try {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  } catch (e) {
+    /* 某些上下文只读，忽略 */
+  }
+  try {
+    Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+  } catch (e) {
+    /* 忽略 */
+  }
+};
+
 class BrowserSession {
   constructor() {
     /** @type {import('playwright').Browser|null} */
@@ -56,15 +81,25 @@ class BrowserSession {
 
     // 持久化上下文选项：可见窗口 + 拟真 UA / 视口（这些原本在 newContext 中设置，
     // 但持久化上下文在 launch 时直接建好，故合并进此处）。
+    // 反检测要点：
+    //  - ignoreDefaultArgs 去掉 Playwright 自动加的 --enable-automation 开关（bot 强特征）；
+    //  - --disable-blink-features=AutomationControlled 抹除 navigator.webdriver；
+    //  - addInitScript 双保险覆盖 webdriver，并统一 navigator.languages；
+    //  - 随机 UA（近期真实 Chrome/Win）+ 视口轻微抖动，降低跨任务指纹关联。
+    const userAgent = REALISTIC_UA_POOL[Math.floor(Math.random() * REALISTIC_UA_POOL.length)];
+    const viewport = {
+      width: 1240 + Math.floor(Math.random() * 200), // 1240-1440
+      height: 800 + Math.floor(Math.random() * 160), // 800-960
+    };
     const contextOptions = {
       headless: false, // T-D5：开本机真实可见窗口（路线 A：Windows 原生 Chrome）
       // 降 bot 识别：去掉 AutomationControlled blink 特性，抹除 navigator.webdriver 痕迹
       args: ['--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+      // 移除 Playwright 自动化开关（谷歌等据此高度关联 bot）
+      ignoreDefaultArgs: ['--enable-automation'],
       // 拟真 UA，降低无头浏览器被识别概率
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-        '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 900 },
+      userAgent: userAgent,
+      viewport: viewport,
     };
 
     // 本机 Chrome：优先用 AUTOCLAW_CHROME_PATH 指定路径，否则自动探测 channel:'chrome'
@@ -84,6 +119,12 @@ class BrowserSession {
       // 注意：userDataDir 作为第一个参数传入，而非放进 options（否则报
       // "userDataDir option is not supported in browserType.launch"）。
       this.context = await chromium.launchPersistentContext(userDataDir, contextOptions);
+      // 反检测：在每个页面加载前注入初始化脚本，抹除 webdriver 痕迹、统一 languages
+      try {
+        await this.context.addInitScript(ANTI_DETECT_INIT_SCRIPT);
+      } catch (e) {
+        /* addInitScript 失败不致命，--disable-blink-features 仍生效 */
+      }
       // 持久化上下文自带 browser()，供 close() 兜底关闭使用
       this.browser = this.context.browser();
     } catch (e) {

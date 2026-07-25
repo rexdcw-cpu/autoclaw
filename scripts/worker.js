@@ -327,6 +327,8 @@ async function runPhased(config, emit, deps) {
           attempts: 1, retriesUsed: 0,
           startedAt: new Date(gT0).toISOString(), endedAt: new Date(gT1).toISOString(),
           durationMs: Math.max(0, gT1 - gT0),
+          found: !!(engine && engine.foundTarget),
+          landedUrl: engine ? engine.landedUrl || null : null,
           error: st === TaskStatus.COMPLETED
             ? null
             : (engine && engine.lastErrorDetail ? engine.lastErrorDetail : String(st)),
@@ -443,6 +445,8 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
       attempts: attempts, retriesUsed: Math.max(0, attempts - 1),
       startedAt: new Date(attT0).toISOString(), endedAt: new Date(attT1).toISOString(),
       durationMs: Math.max(0, attT1 - attT0),
+      found: !!(engine && engine.foundTarget),
+      landedUrl: engine ? engine.landedUrl || null : null,
       error: ok ? null : (terminal === TaskStatus.FAILED ? '流程连续失败 ' + attempts + ' 次' : terminal),
     });
 

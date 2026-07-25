@@ -79,9 +79,11 @@ function recordVpn(run, vpn) {
 /**
  * 追加一条单轮（WIFI / VPN 节点）结果记录。
  * @param {object} run newRun() 产物
- * @param {{ssid:?string, status:string, attempts:number, retriesUsed:number, error:?string, via?:string, startedAt?:?string, endedAt?:?string, durationMs?:?number}} rec
+ * @param {{ssid:?string, status:string, attempts:number, retriesUsed:number, error:?string, via?:string, startedAt?:?string, endedAt?:?string, durationMs?:?number, found?:boolean, landedUrl?:?string}} rec
  *   via: 'wifi'（百度按 WiFi 轮询）| 'vpn'（谷歌按 VPN 节点轮询），缺省 'wifi'
  *   durationMs: 该 WiFi/VPN 节点本轮流程耗时（毫秒），由 worker 在真实运行处打时间戳
+ *   found: 该轮是否真正命中并进入目标站（SEO 关键成功信号，区别于「流程没崩」）
+ *   landedUrl: ENTER 阶段实际 goto 的真实地址（命中时记录）
  */
 function recordWifi(run, rec) {
   run.perWifi.push({
@@ -90,6 +92,8 @@ function recordWifi(run, rec) {
     attempts: rec.attempts || 0,
     retriesUsed: rec.retriesUsed || 0,
     via: rec.via || 'wifi',
+    found: rec.found === true,
+    landedUrl: rec.landedUrl || null,
     error: rec.error || null,
     startedAt: rec.startedAt || null,
     endedAt: rec.endedAt || null,
@@ -112,13 +116,16 @@ function summarize(run) {
   const nodeDurations = run.perWifi.map((w) => (w.durationMs != null ? w.durationMs : 0));
   const sumNodeDur = nodeDurations.reduce((s, d) => s + d, 0);
   const avgNodeDur = nodeDurations.length ? Math.round(sumNodeDur / nodeDurations.length) : 0;
+  const foundCount = run.perWifi.filter((w) => w.found === true).length;
 
   run.summary = {
     totalWifi: total,
     completedWifi: completed,
     failedWifi: failed,
     skippedWifi: skipped,
+    foundWifi: foundCount,
     completionRate: total ? Math.round((completed / total) * 100) : 0,
+    foundRate: total ? Math.round((foundCount / total) * 100) : 0,
     totalFlowAttempts: totalAttempts,
     totalRetries: totalRetries,
     totalDurationMs: (run.durationMs != null ? run.durationMs : null),
@@ -160,6 +167,7 @@ function renderMarkdown(run) {
   lines.push('| 失败 | ' + s.failedWifi + ' |');
   lines.push('| 跳过（切换失败等） | ' + s.skippedWifi + ' |');
   lines.push('| 完成率 | ' + s.completionRate + '% |');
+  lines.push('| 命中目标率（找到并进入目标站） | ' + s.foundRate + '%（' + s.foundWifi + '/' + s.totalWifi + '） |');
   lines.push('| 流程总尝试次数 | ' + s.totalFlowAttempts + ' |');
   lines.push('| 累计重试次数 | ' + s.totalRetries + ' |');
   lines.push('| 阶段总耗时 | ' + fmtDur(s.totalDurationMs) + ' |');
@@ -188,13 +196,15 @@ function renderMarkdown(run) {
   const detailHeader = run.platform === 'google' ? '## 逐 VPN 节点明细' : '## 逐 WIFI 明细';
   lines.push(detailHeader);
   lines.push('');
-  lines.push('| # | 网络 / VPN 节点 | 终态 | 尝试次数 | 重试次数 | 耗时 | 备注 |');
-  lines.push('| --- | --- | --- | --- | --- | --- | --- |');
+  lines.push('| # | 网络 / VPN 节点 | 终态 | 命中目标 | 尝试次数 | 重试次数 | 耗时 | 备注 |');
+  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
   run.perWifi.forEach((w, i) => {
     const name = w.ssid || (w.via === 'vpn' ? '当前节点' : '当前网络');
     const axisTag = w.via === 'vpn' ? '（VPN 节点）' : '';
+    const foundMark = w.found ? '✅' : (w.status === 'completed' ? '⚠️未命中' : '—');
     const note = w.error ? w.error : (w.status === 'completed' ? (w.retriesUsed > 0 ? ('含 ' + w.retriesUsed + ' 次重试后成功') : '一次成功') : '');
-    lines.push('| ' + (i + 1) + ' | ' + name + axisTag + ' | ' + w.status + ' | ' + w.attempts + ' | ' + w.retriesUsed + ' | ' + fmtDur(w.durationMs) + ' | ' + note + ' |');
+    const landed = w.landedUrl ? (' → ' + w.landedUrl) : '';
+    lines.push('| ' + (i + 1) + ' | ' + name + axisTag + ' | ' + w.status + ' | ' + foundMark + ' | ' + w.attempts + ' | ' + w.retriesUsed + ' | ' + fmtDur(w.durationMs) + ' | ' + note + landed + ' |');
   });
   lines.push('');
   return lines.join('\n');
