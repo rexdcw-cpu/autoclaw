@@ -185,6 +185,15 @@
   }
 
   // ----- 任务完成度总结卡片（task_stats 事件触发）-----
+  // 每个平台（百度/谷歌）一张独立卡片，累计追加；不整段覆盖，避免后到的阶段把先到的清掉。
+  var renderedSummaryPlatforms = {}; // 去重：同一平台只渲染一次（重连/轮询回填可能重复收到）
+
+  function platformLabel(platform) {
+    if (platform === 'baidu') return '百度';
+    if (platform === 'google') return '谷歌';
+    return platform || '未知平台';
+  }
+
   function summaryCell(label, val) {
     return '<div class="summary-cell"><span class="sc-label">' + escapeHtml(label) +
       '</span><span class="sc-val">' + escapeHtml(String(val == null ? '' : val)) + '</span></div>';
@@ -195,6 +204,12 @@
     var s = ev.stats || (ev.statsDetail && ev.statsDetail.summary);
     if (!s) return;
     var detail = ev.statsDetail;
+    var platform = (detail && detail.platform) || (s.platform) || '未知平台';
+
+    // 去重：同一平台只渲染一次
+    if (renderedSummaryPlatforms[platform]) return;
+    renderedSummaryPlatforms[platform] = true;
+
     var perWifi = (detail && detail.perWifi) || [];
     var rate = s.completionRate != null ? s.completionRate
       : (s.totalWifi ? Math.round((s.completedWifi / s.totalWifi) * 100) : 0);
@@ -202,21 +217,31 @@
       var st = w.status === 'completed' ? 'ok' : (w.status === 'failed' ? 'fail' : 'skip');
       var stTxt = w.status === 'completed' ? '完成'
         : (w.status === 'failed' ? '失败' : (w.status === 'skipped' ? '跳过' : (w.status || '—')));
+      var found = w.found ? ' ✅' : (w.status === 'completed' ? ' ⚠️未命中' : '');
       return '<tr><td>' + (i + 1) + '</td><td>' + escapeHtml(w.ssid) + '</td>' +
         '<td><span class="badge ' + st + '">' + stTxt + '</span></td>' +
         '<td>' + (w.attempts || 1) + '</td><td>' + (w.retriesUsed || 0) + '</td>' +
-        (w.error ? '<td class="err">' + escapeHtml(w.error) + '</td>' : '<td class="muted">—</td>') + '</tr>';
+        (w.error ? '<td class="err">' + escapeHtml(w.error) + '</td>' : '<td class="muted">—' + found + '</td>') + '</tr>';
     }).join('');
-    $summary.hidden = false;
-    $summary.innerHTML =
-      '<div class="log-head"><h2>📊 任务完成度总结</h2>' +
-      '<span class="conn-state">' + (ev.message ? escapeHtml(ev.message) : '') + '</span></div>' +
+
+    // 首次渲染时清空旧内容并加总标题；之后每平台追加一张卡片
+    if ($summary.hidden) {
+      $summary.innerHTML = '<div class="log-head"><h2>📊 任务完成度总结</h2>' +
+        '<span class="conn-state">' + (ev.message ? escapeHtml(ev.message) : '') + '</span></div>';
+      $summary.hidden = false;
+    }
+    var card = document.createElement('div');
+    card.className = 'summary-card summary-card-' + escapeHtml(platform);
+    card.innerHTML =
+      '<div class="summary-card-head"><h3>📌 ' + escapeHtml(platformLabel(platform)) + ' 阶段</h3>' +
+        '<span class="summary-card-platform">' + escapeHtml(platform) + '</span></div>' +
       '<div class="summary-grid">' +
-        summaryCell('轮询 WIFI 总数', s.totalWifi) +
+        summaryCell('WIFI/节点总数', s.totalWifi) +
         summaryCell('完成', s.completedWifi) +
         summaryCell('失败', s.failedWifi) +
         summaryCell('跳过', s.skippedWifi) +
         summaryCell('完成率', rate + '%') +
+        summaryCell('命中目标率', (s.foundRate != null ? s.foundRate : '—') + '%') +
         summaryCell('流程总尝试', s.totalFlowAttempts) +
         summaryCell('累计重试', s.totalRetries) +
         summaryCell('整体结论', s.overall) +
@@ -224,6 +249,7 @@
       (rows ? '<table class="summary-table"><thead><tr><th>#</th><th>WIFI / 网络</th>' +
         '<th>终态</th><th>尝试</th><th>重试</th><th>备注</th></tr></thead><tbody>' + rows + '</tbody></table>'
         : '<p class="hint">无逐 WIFI 明细</p>');
+    $summary.appendChild(card);
     $summary.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 

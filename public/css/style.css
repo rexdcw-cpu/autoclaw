@@ -386,6 +386,30 @@ button.danger {
   background: rgba(250, 204, 21, 0.18);
   color: var(--warn);
 }
+/* v0.3.32 每个平台（百度/谷歌）一张独立卡片，累计追加，避免后到阶段覆盖先到 */
+.summary-card {
+  margin-top: 14px;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 12px;
+}
+.summary-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.summary-card-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.summary-card-platform {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 
 /* 客户管理面板（V2 客户线） */
 .client-admin {
