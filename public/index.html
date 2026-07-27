@@ -18,7 +18,7 @@
         <fieldset class="field">
           <legend>平台（多选）</legend>
           <label class="check"><input type="checkbox" name="platforms" value="baidu" checked /> 百度</label>
-          <label class="check"><input type="checkbox" name="platforms" value="google" /> 谷歌（需 VPN 出口）</label>
+          <label class="check"><input type="checkbox" name="platforms" value="google" checked /> 谷歌（需 VPN 出口）</label>
           <small class="hint">同时勾选百度 + 谷歌时：先跑完百度（走本机真实 IP），再自动开启 VPN 出口跑谷歌。谷歌开始前列举 VPN 主节点、剔除【超时】/不可达节点、切到最优节点后再开 Chrome。</small>
         </fieldset>
 
@@ -127,7 +127,7 @@
         <!-- WIFI 轮询（本次任务新增） -->
         <fieldset class="field">
           <legend>WIFI 轮询（可选）</legend>
-          <label class="check"><input type="checkbox" id="poll-wifi" name="poll-wifi" /> 轮询切换 WIFI（勾选后：每跑完一轮流程自动切换下一个 WIFI，全部 WIFI 跑完才算任务完成）</label>
+          <label class="check"><input type="checkbox" id="poll-wifi" name="poll-wifi" checked /> 轮询切换 WIFI（勾选后：每跑完一轮流程自动切换下一个 WIFI，全部 WIFI 跑完才算任务完成）</label>
           <small class="hint">不勾选则只跑当前网络一次即完成。轮询仅遍历面板里「已存」（记住密码）的 WIFI，切下一个前停留 5 秒。</small>
           <div id="poll-wifi-hint" class="poll-hint"></div>
         </fieldset>
