@@ -4,7 +4,21 @@
 
 ---
 
-## [0.3.35] — 2026-07-27
+## [0.3.36] — 2026-07-27
+
+### Fixed / Optimized（P1 + P24）
+- **P1 百度 WIFI 归一化去重**：`buildWifiSeq` 在构建轮询序列时，对 SSID 做保守归一化（剥离 `HUAWEI-`/`ChinaNet-`/`CMCC-`/`TP-LINK_` 等品牌前缀，以及 `_5G`/`2.4G`/`5.8G` 频段后缀），归一化后完全一致视为同一物理路由，只保留首个。避免同一路由的 2.4G/5G 双频（如 `HUAWEI-805`、`HUAWEI-805_5G`、`805_5G`）被当作不同网络重复跑百度流程。去重信息写入 `sourceDesc` 与独立 `dedupDropped` 字段，前端/统计可见。
+- **P24 谷歌机器人验证日志增强**：命中 Google 异常流量验证码（`ERR_GOOGLE_CAPTCHA`）或同意页拦截（`ERR_GOOGLE_CONSENT`）时，结构化记录——
+  - `taskEngine.runRound` 置位 `captchaHit` 并发一条 `EventType.ALERT` 事件（`【验证码/拦截】平台『google』节点『X』命中谷歌机器人验证/同意页拦截…`），压测时在进度页实时可见；
+  - `worker` 谷歌阶段 `recordWifi` 写入 `captcha` 字段；
+  - `taskStats` 增加 `captchaWifi` 统计（summary + Markdown 顶部「触发谷歌机器人验证/同意页拦截 N 个节点」+ 逐节点「验证拦截」列）；
+  - 前端进度页总结卡片增加「触发验证 N 节点」单元格与逐节点「验证拦截」列。
+- 新增单测 `test/wifiDedupCaptcha.test.js`（7 例）：归一化键、buildWifiSeq 去重、captcha 统计。
+
+### Changed
+- `scripts/worker.js` 导出 `normalizeSsidKey` 便于测试。
+
+
 
 ### Changed（前端表单默认值）
 - 任务配置页默认勾选 **百度 + 谷歌** 两个平台（此前仅百度默认勾选）。

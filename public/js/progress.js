@@ -218,8 +218,11 @@
       var stTxt = w.status === 'completed' ? '完成'
         : (w.status === 'failed' ? '失败' : (w.status === 'skipped' ? '跳过' : (w.status || '—')));
       var found = w.found ? ' ✅' : (w.status === 'completed' ? ' ⚠️未命中' : '');
+      var captchaMark = w.captcha ? '<span class="badge warn">⚠️是</span>' : '—';
       return '<tr><td>' + (i + 1) + '</td><td>' + escapeHtml(w.ssid) + '</td>' +
         '<td><span class="badge ' + st + '">' + stTxt + '</span></td>' +
+        '<td>' + (w.found ? '✅' : '—') + '</td>' +
+        '<td>' + captchaMark + '</td>' +
         '<td>' + (w.attempts || 1) + '</td><td>' + (w.retriesUsed || 0) + '</td>' +
         (w.error ? '<td class="err">' + escapeHtml(w.error) + '</td>' : '<td class="muted">—' + found + '</td>') + '</tr>';
     }).join('');
@@ -242,12 +245,13 @@
         summaryCell('跳过', s.skippedWifi) +
         summaryCell('完成率', rate + '%') +
         summaryCell('命中目标率', (s.foundRate != null ? s.foundRate : '—') + '%') +
+        (platform === 'google' ? summaryCell('触发验证', (s.captchaWifi != null ? s.captchaWifi : 0) + ' 节点') : '') +
         summaryCell('流程总尝试', s.totalFlowAttempts) +
         summaryCell('累计重试', s.totalRetries) +
         summaryCell('整体结论', s.overall) +
       '</div>' +
       (rows ? '<table class="summary-table"><thead><tr><th>#</th><th>WIFI / 网络</th>' +
-        '<th>终态</th><th>尝试</th><th>重试</th><th>备注</th></tr></thead><tbody>' + rows + '</tbody></table>'
+        '<th>终态</th><th>命中</th><th>验证拦截</th><th>尝试</th><th>重试</th><th>备注</th></tr></thead><tbody>' + rows + '</tbody></table>'
         : '<p class="hint">无逐 WIFI 明细</p>');
     $summary.appendChild(card);
     $summary.scrollIntoView({ behavior: 'smooth', block: 'nearest' });

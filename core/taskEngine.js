@@ -122,6 +122,7 @@ class TaskEngine {
     this.foundTarget = false; // LOCATE 阶段命中目标域名+标题双匹配
     this.landedUrl = null; // ENTER 阶段实际 goto 的真实地址
     this.enteredTarget = false; // ENTER 阶段成功落地目标站
+    this.captchaHit = false; // 本轮是否命中谷歌验证码 / 同意页拦截（供压测统计与日志）
   }
 
   /** 请求暂停（在下一轮安全点生效） */
@@ -461,6 +462,25 @@ class TaskEngine {
     );
     let roundSuccess = true;
 
+    // 命中谷歌验证码 / 同意页拦截时，置位 captchaHit 并发一条结构化 ALERT 事件，
+    // 便于压测时在进度页实时看到「某节点触发了机器人验证」，并写入统计 perWifi.captcha。
+    const flagCaptchaIfBlocked = (detail) => {
+      if (!detail) return false;
+      if (/ERR_GOOGLE_CAPTCHA|ERR_GOOGLE_CONSENT|异常流量|验证码|confirm you are a human|our systems have detected|unusual traffic|robot/i.test(detail)) {
+        this.captchaHit = true;
+        const node = (this._vpnPreset && this._vpnPreset.node) || this._vpnNode || '';
+        this.emit(P.makeProgress({
+          taskId,
+          type: EventType.ALERT,
+          message: '【验证码/拦截】平台『' + plan.platform + '』' +
+            (node ? '节点『' + node + '』' : '') +
+            ' 命中谷歌机器人验证/同意页拦截（' + detail.slice(0, 90) + '）',
+        }));
+        return true;
+      }
+      return false;
+    };
+
     this.emit(P.makeProgress({ taskId, type: EventType.ROUND_START, round, stats: this._makeStats() }));
 
     try {
@@ -475,6 +495,7 @@ class TaskEngine {
         roundSuccess = false;
         round.error = ERR.ERR_ADAPTER_FAIL;
         this.lastErrorDetail = searchStep.detail || String(round.error);
+        flagCaptchaIfBlocked(this.lastErrorDetail);
       }
 
       // 步骤间拟人微动作（search → locate）
@@ -497,6 +518,7 @@ class TaskEngine {
           roundSuccess = false;
           round.error = ERR.ERR_NO_TARGET;
           this.lastErrorDetail = locateStep.detail || String(round.error);
+          flagCaptchaIfBlocked(this.lastErrorDetail);
         } else {
           // 关键成功信号：LOCATE 命中目标 → 记录命中与真实落地地址
           this.foundTarget = true;

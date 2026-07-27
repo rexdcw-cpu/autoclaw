@@ -78,8 +78,24 @@ let abort = false;
 let abortStatus = TaskStatus.STOPPED;
 
 /**
+ * 保守 SSID 归一化键：剥离常见路由品牌前缀与频段后缀，用于去重判断。
+ * 目的：同物理路由的 2.4G/5G 双频（如 HUAWEI-805 与 HUAWEI-805_5G 与 805_5G）
+ * 归一化后相同，只保留一个，避免在百度阶段对同一个网络重复点击目标站。
+ * 仅当剥离后完全一致才合并，误并概率极低。
+ * @param {string} ssid
+ * @returns {string}
+ */
+function normalizeSsidKey(ssid) {
+  if (!ssid) return '';
+  let s = String(ssid).trim().toLowerCase();
+  s = s.replace(/^(huawei|chinanet|cmcc|tp-link|tenda|mercury|xiaomi|redmi|mi|fast|ruijie|phicomm|honor|asus|netgear|d-link|linksys)[-_]/, '');
+  s = s.replace(/[-_ ]?(2\.4|5|5\.8)[gG]$/, '');
+  return s;
+}
+
+/**
  * 构建 WIFI 轮询序列（仅 pollWifi）：优先面板「已存」集合，回退可见且本机已存凭证。
- * 返回 { seq, usedRemembered, sourceDesc }。
+ * 返回 { seq, usedRemembered, sourceDesc, dedupDropped }。
  */
 async function buildWifiSeq(config, wm) {
   const current = await wm.getCurrentSsid();
@@ -97,6 +113,22 @@ async function buildWifiSeq(config, wm) {
   let pool = source.filter((s) => visibleSet.has(s));
   const excludedNotVisible = beforeLen - pool.length;
   if (pool.length === 0) pool = source.slice();
+
+  // 归一化去重（保守）：剥离品牌前缀/频段后缀后相同 → 视为同一物理路由，只保留首个。
+  // 避免 2.4G/5G 双频或品牌前缀变体被当作不同网络重复跑。
+  const seenKeys = new Set();
+  const dedupDropped = [];
+  const deduped = [];
+  for (const s of pool) {
+    const key = normalizeSsidKey(s);
+    if (seenKeys.has(key)) {
+      dedupDropped.push(s);
+      continue;
+    }
+    seenKeys.add(key);
+    deduped.push(s);
+  }
+  pool = deduped;
   if (current && !pool.includes(current) && visibleSet.has(current)) {
     pool.unshift(current);
   }
@@ -109,9 +141,11 @@ async function buildWifiSeq(config, wm) {
   }
   const sourceDesc = usedRemembered
     ? ('面板『已存』集合遍历 ' + pool.length + ' 个 WIFI（共 ' + beforeLen + ' 个已存' +
-      (excludedNotVisible ? '，已剔除不可见 ' + excludedNotVisible + ' 个' : '') + '）')
-    : ('兜底遍历 ' + pool.length + ' 个 WIFI（可见且本机已存凭证，未收到面板已存集合）');
-  return { seq: pool, usedRemembered, sourceDesc };
+      (excludedNotVisible ? '，已剔除不可见 ' + excludedNotVisible + ' 个' : '') +
+      (dedupDropped.length ? '，已去重 ' + dedupDropped.length + ' 个疑似同路由不同频段（' + dedupDropped.join('、') + '）' : '') + '）')
+    : ('兜底遍历 ' + pool.length + ' 个 WIFI（可见且本机已存凭证，未收到面板已存集合' +
+      (dedupDropped.length ? '，已去重 ' + dedupDropped.length + ' 个' : '') + '）');
+  return { seq: pool, usedRemembered, sourceDesc, dedupDropped };
 }
 
 // ===========================================================================
@@ -340,6 +374,7 @@ async function runPhased(config, emit, deps) {
           durationMs: Math.max(0, gT1 - gT0),
           found: !!(engine && engine.foundTarget),
           landedUrl: engine ? engine.landedUrl || null : null,
+          captcha: !!(engine && engine.captchaHit),
           error: st === TaskStatus.COMPLETED
             ? null
             : (engine && engine.lastErrorDetail ? engine.lastErrorDetail : String(st)),
@@ -717,4 +752,4 @@ process.on('unhandledRejection', (reason) => {
   }
 });
 
-module.exports = { runTask, runLegacy, runPhased, buildWifiSeq, sleep };
+module.exports = { runTask, runLegacy, runPhased, buildWifiSeq, normalizeSsidKey, sleep };

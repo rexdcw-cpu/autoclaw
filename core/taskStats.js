@@ -94,6 +94,7 @@ function recordWifi(run, rec) {
     via: rec.via || 'wifi',
     found: rec.found === true,
     landedUrl: rec.landedUrl || null,
+    captcha: rec.captcha === true,
     error: rec.error || null,
     startedAt: rec.startedAt || null,
     endedAt: rec.endedAt || null,
@@ -117,6 +118,7 @@ function summarize(run) {
   const sumNodeDur = nodeDurations.reduce((s, d) => s + d, 0);
   const avgNodeDur = nodeDurations.length ? Math.round(sumNodeDur / nodeDurations.length) : 0;
   const foundCount = run.perWifi.filter((w) => w.found === true).length;
+  const captchaCount = run.perWifi.filter((w) => w.captcha === true).length;
 
   run.summary = {
     totalWifi: total,
@@ -124,6 +126,7 @@ function summarize(run) {
     failedWifi: failed,
     skippedWifi: skipped,
     foundWifi: foundCount,
+    captchaWifi: captchaCount,
     completionRate: total ? Math.round((completed / total) * 100) : 0,
     foundRate: total ? Math.round((foundCount / total) * 100) : 0,
     totalFlowAttempts: totalAttempts,
@@ -168,6 +171,9 @@ function renderMarkdown(run) {
   lines.push('| 跳过（切换失败等） | ' + s.skippedWifi + ' |');
   lines.push('| 完成率 | ' + s.completionRate + '% |');
   lines.push('| 命中目标率（找到并进入目标站） | ' + s.foundRate + '%（' + s.foundWifi + '/' + s.totalWifi + '） |');
+  if (run.platform === 'google') {
+    lines.push('| 触发谷歌机器人验证 / 同意页拦截 | ' + s.captchaWifi + ' 个节点 |');
+  }
   lines.push('| 流程总尝试次数 | ' + s.totalFlowAttempts + ' |');
   lines.push('| 累计重试次数 | ' + s.totalRetries + ' |');
   lines.push('| 阶段总耗时 | ' + fmtDur(s.totalDurationMs) + ' |');
@@ -200,15 +206,16 @@ function renderMarkdown(run) {
   const detailHeader = run.platform === 'google' ? '## 逐 VPN 节点明细' : '## 逐 WIFI 明细';
   lines.push(detailHeader);
   lines.push('');
-  lines.push('| # | 网络 / VPN 节点 | 终态 | 命中目标 | 尝试次数 | 重试次数 | 耗时 | 备注 |');
-  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
+  lines.push('| # | 网络 / VPN 节点 | 终态 | 命中目标 | 验证拦截 | 尝试次数 | 重试次数 | 耗时 | 备注 |');
+  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
   run.perWifi.forEach((w, i) => {
     const name = w.ssid || (w.via === 'vpn' ? '当前节点' : '当前网络');
     const axisTag = w.via === 'vpn' ? '（VPN 节点）' : '';
     const foundMark = w.found ? '✅' : (w.status === 'completed' ? '⚠️未命中' : '—');
+    const captchaMark = w.captcha ? '⚠️是' : '—';
     const note = w.error ? w.error : (w.status === 'completed' ? (w.retriesUsed > 0 ? ('含 ' + w.retriesUsed + ' 次重试后成功') : '一次成功') : '');
     const landed = w.landedUrl ? (' → ' + w.landedUrl) : '';
-    lines.push('| ' + (i + 1) + ' | ' + name + axisTag + ' | ' + w.status + ' | ' + foundMark + ' | ' + w.attempts + ' | ' + w.retriesUsed + ' | ' + fmtDur(w.durationMs) + ' | ' + note + landed + ' |');
+    lines.push('| ' + (i + 1) + ' | ' + name + axisTag + ' | ' + w.status + ' | ' + foundMark + ' | ' + captchaMark + ' | ' + w.attempts + ' | ' + w.retriesUsed + ' | ' + fmtDur(w.durationMs) + ' | ' + note + landed + ' |');
   });
   lines.push('');
   return lines.join('\n');
