@@ -343,3 +343,121 @@ test('分阶段：时长统计（每节点 durationMs + 阶段 endedAt）', asyn
     assert.ok(typeof w.endedAt === 'string' && w.endedAt.length > 0, '节点应有 endedAt');
   });
 });
+
+// ---------------------------------------------------------------------------
+// 7) 谷歌阶段失败自动换备选节点补跑（v0.3.34）：某节点失败→从剩余池自动补跑直到达标
+// ---------------------------------------------------------------------------
+test('分阶段：谷歌某节点失败自动换备选节点补跑，最终成功数达标', async () => {
+  // 假 engine：指定节点『N1』失败时返回 FAILED，其余成功（模拟 US1 偶发限流）
+  const failNodes = new Set(['N1']);
+  let made = 0;
+  const engineFactory = (config, emit) => ({
+    run: async (roundsOverride, opts) => {
+      const node = (opts && opts.vpnPreset && opts.vpnPreset.node) || null;
+      made += 1;
+      if (node && failNodes.has(node)) return TaskStatus.FAILED;
+      return TaskStatus.COMPLETED;
+    },
+    setPause() {},
+    setStop() {},
+  });
+  const wifi = makeWifi(['A'], 'A');
+  // 可用节点池 N1(失败) N2 N3 N4：目标跑满 3 个成功 → 期望尝试 N1(fail)→N2→N3→N4
+  const vpn = makeVpn(['N1', 'N2', 'N3', 'N4']);
+  const stats = makeFakeStats();
+  const vpnLauncher = makeFakeVpnLauncher();
+  const rounds = [
+    { roundIndex: 0, totalRounds: 2, platform: 'baidu', keyword: 'k1' },
+    { roundIndex: 1, totalRounds: 2, platform: 'google', keyword: 'k1' },
+  ];
+  const cfg = buildConfig(['baidu', 'google'], rounds, true, ['A']);
+
+  const events = [];
+  const status = await runTask(cfg, (e) => events.push(e), {
+    wifi, engineFactory, vpn, statsModule: stats, vpnLauncher, sleep: async () => {},
+  });
+
+  const googleRun = stats.runs.find((r) => r.platform === 'google');
+  // 目标数 = 全部可用节点（4）；N1 失败后自动补跑 N2/N3/N4，最终成功 3 个
+  assert.strictEqual(googleRun.vpn.usedCount, 3, '成功节点数应为 3（不含失败）');
+  assert.strictEqual(googleRun.vpn.targetCount, 4, '目标数应为全部可用节点 4');
+  assert.strictEqual(googleRun.vpn.usedNode, 'N2', '首个成功节点应为 N2（N1 已失败）');
+  // 明细：1 failed + 3 completed = 4 条
+  const failed = googleRun.perWifi.filter((w) => w.status === 'failed');
+  const completed = googleRun.perWifi.filter((w) => w.status === 'completed');
+  assert.strictEqual(failed.length, 1, '应有 1 个失败节点');
+  assert.strictEqual(failed[0].ssid, 'N1', '失败节点应为 N1');
+  assert.strictEqual(completed.length, 3, '应有 3 个成功节点');
+  assert.deepStrictEqual(completed.map((w) => w.ssid), ['N2', 'N3', 'N4'], '成功顺序应为 N2/N3/N4');
+  // 整体状态仍 completed（失败节点被补跑替代，不计入失败率）
+  assert.strictEqual(status, TaskStatus.COMPLETED);
+});
+
+// ---------------------------------------------------------------------------
+// 8) 备选池耗尽仍不足目标数：记成功数，不崩溃
+// ---------------------------------------------------------------------------
+test('分阶段：谷歌所有节点均失败→成功数不足目标、不崩溃、整阶段 FAILED', async () => {
+  let made = 0;
+  const engineFactory = () => ({
+    run: async () => { made += 1; return TaskStatus.FAILED; },
+    setPause() {},
+    setStop() {},
+  });
+  const wifi = makeWifi(['A'], 'A');
+  const vpn = makeVpn(['N1', 'N2']); // 目标 2，但全失败
+  const stats = makeFakeStats();
+  const vpnLauncher = makeFakeVpnLauncher();
+  const rounds = [
+    { roundIndex: 0, totalRounds: 2, platform: 'baidu', keyword: 'k1' },
+    { roundIndex: 1, totalRounds: 2, platform: 'google', keyword: 'k1' },
+  ];
+  const cfg = buildConfig(['baidu', 'google'], rounds, true, ['A']);
+
+  const status = await runTask(cfg, () => {}, {
+    wifi, engineFactory, vpn, statsModule: stats, vpnLauncher, sleep: async () => {},
+  });
+
+  const googleRun = stats.runs.find((r) => r.platform === 'google');
+  assert.strictEqual(googleRun.vpn.usedCount, 0, '成功数应为 0');
+  assert.strictEqual(googleRun.perWifi.length, 2, '应尝试完所有 2 个节点');
+  assert.strictEqual(googleRun.perWifi.every((w) => w.status === 'failed'), true, '全失败');
+  // 谷歌阶段 FAILED（worstStatus），因百度成功，整体非 COMPLETED
+  assert.strictEqual(status, TaskStatus.FAILED, '全失败应使谷歌阶段 FAILED');
+});
+
+// ---------------------------------------------------------------------------
+// 9) AUTOCLAW_GOOGLE_MAX_NODES 限制下，报告 usedNode 为真实首个成功节点（非 available[0]）
+// ---------------------------------------------------------------------------
+test('分阶段：限制 MAX_NODES 时 usedNode 为首个成功节点而非 available[0]', async () => {
+  // 仅第一个节点成功（模拟：若 available[0] 恰好是限流节点，但本轮 available[0] 成功）
+  let made = 0;
+  const engineFactory = (config, emit) => ({
+    run: async () => { made += 1; return TaskStatus.COMPLETED; },
+    setPause() {},
+    setStop() {},
+  });
+  const wifi = makeWifi(['A'], 'A');
+  const vpn = makeVpn(['N1', 'N2', 'N3', 'N4', 'N5']);
+  const stats = makeFakeStats();
+  const vpnLauncher = makeFakeVpnLauncher();
+  const rounds = [{ roundIndex: 0, totalRounds: 1, platform: 'google', keyword: 'k1' }];
+  const cfg = buildConfig(['google'], rounds, false, []);
+
+  // 限制只跑满 2 个成功节点
+  const prevEnv = process.env.AUTOCLAW_GOOGLE_MAX_NODES;
+  process.env.AUTOCLAW_GOOGLE_MAX_NODES = '2';
+  try {
+    await runTask(cfg, () => {}, {
+      wifi, engineFactory, vpn, statsModule: stats, vpnLauncher, sleep: async () => {},
+    });
+  } finally {
+    if (prevEnv === undefined) delete process.env.AUTOCLAW_GOOGLE_MAX_NODES;
+    else process.env.AUTOCLAW_GOOGLE_MAX_NODES = prevEnv;
+  }
+
+  const googleRun = stats.runs.find((r) => r.platform === 'google');
+  assert.strictEqual(googleRun.vpn.usedCount, 2, '成功节点数=2');
+  assert.strictEqual(googleRun.vpn.targetCount, 2, '目标数=2');
+  assert.strictEqual(googleRun.vpn.usedNode, 'N1', '首个成功节点应为 N1');
+  assert.strictEqual(googleRun.perWifi.length, 2, '明细应 2 条');
+});

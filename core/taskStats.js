@@ -187,7 +187,11 @@ function renderMarkdown(run) {
     } else {
       lines.push('- 状态：已开启并走 VPN 出口');
       lines.push('- 主节点可用：' + (v.availableCount != null ? v.availableCount : '?') + ' / ' + (v.total != null ? v.total : '?'));
-      lines.push('- 选用节点：' + (v.usedNode || (v.current || '未知')));
+      lines.push('- 选用节点：' + (v.usedNode || (v.current || '未知')) +
+        (v.usedCount != null && v.targetCount != null
+          ? '（成功 ' + v.usedCount + ' / 目标 ' + v.targetCount + ' 个' +
+            (v.usedCount < v.targetCount ? '，部分节点失败已自动换备选补跑' : '') + '）'
+          : ''));
       lines.push('- 代理地址：' + (v.proxyUrl || '（未记录）'));
     }
     lines.push('');

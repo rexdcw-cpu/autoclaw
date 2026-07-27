@@ -279,21 +279,32 @@ async function runPhased(config, emit, deps) {
       // 单节点上限（默认轮询全部可用节点）：设 AUTOCLAW_GOOGLE_MAX_NODES=N
       // 只跑前 N 个节点。用于「把单个流程跑通」时仅验证一个节点、不轮询全部。
       const nodeCapEnv = Number(process.env.AUTOCLAW_GOOGLE_MAX_NODES) || 0;
-      const nodeCap = nodeCapEnv > 0
+      const targetCount = nodeCapEnv > 0
         ? Math.max(1, Math.min(diag.available.length, nodeCapEnv))
         : diag.available.length;
       emit(P.makeProgress({
         taskId: config.taskId,
         type: EventType.WIFI_POLL,
         message: '【谷歌阶段】VPN 已开启：主节点可用 ' + diag.available.length + '/' + diag.total +
-          ' 个（已剔除超时/不可达），将按节点轮询（本地网线，不切 WiFi）' +
-          (nodeCap < diag.available.length ? '（受 AUTOCLAW_GOOGLE_MAX_NODES=' + nodeCap + ' 限制仅跑前 ' + nodeCap + ' 个）' : ''),
+          ' 个（已剔除超时/不可达），目标跑满 ' + targetCount + ' 个成功节点（失败自动换备选节点补跑，本地网线，不切 WiFi）' +
+          (targetCount < diag.available.length ? '（受 AUTOCLAW_GOOGLE_MAX_NODES=' + targetCount + ' 限制）' : ''),
         wifiIndex: 0,
-        wifiTotal: nodeCap,
+        wifiTotal: targetCount,
       }));
 
-      for (let i = 0; i < nodeCap; i += 1) {
-        const node = diag.available[i];
+      // 补跑模型：维护「尚未尝试过的备用节点池」(pool) + 「已用节点」(used)。
+      // 逐个取 pool 头节点跑谷歌；成功则计入成功数；失败则记 failed 并自动从 pool 取下一个补跑；
+      // 直到成功数达标（targetCount）或 pool 耗尽（不留缺口，有多少成功算多少）。
+      const pool = diag.available.slice();
+      const usedOrder = [];
+      let successCount = 0;
+      let firstSuccessNode = null;
+      let pollIndex = 0;
+
+      while (successCount < targetCount && pool.length > 0) {
+        const node = pool.shift();
+        usedOrder.push(node);
+        pollIndex += 1;
         if (abort) { finalStatus = worstStatus(finalStatus, abortStatus); break; }
         try {
           await vpn.selectNode(node);
@@ -311,10 +322,10 @@ async function runPhased(config, emit, deps) {
         emit(P.makeProgress({
           taskId: config.taskId,
           type: EventType.WIFI_POLL,
-          message: '【谷歌阶段】节点轮询 ' + (i + 1) + '/' + nodeCap +
-            '：切至『' + node + '』开始谷歌流程',
-          wifiIndex: i + 1,
-          wifiTotal: nodeCap,
+          message: '【谷歌阶段】节点轮询 ' + pollIndex + '：切至『' + node + '』开始谷歌流程' +
+            (pool.length > 0 ? '（剩余备选 ' + pool.length + ' 个）' : ''),
+          wifiIndex: pollIndex,
+          wifiTotal: targetCount,
         }));
         const gT0 = Date.now();
         const st = await eng.run(googleRounds, { vpnPreset: preset });
@@ -333,16 +344,42 @@ async function runPhased(config, emit, deps) {
             ? null
             : (engine && engine.lastErrorDetail ? engine.lastErrorDetail : String(st)),
         });
-        finalStatus = worstStatus(finalStatus, st);
+        if (st === TaskStatus.COMPLETED) {
+          successCount += 1;
+          if (!firstSuccessNode) firstSuccessNode = node;
+        }
+        // 补跑模型：单个节点失败已被自动换成备选节点补跑，不应据此把整阶段判 FAILED；
+        // 整阶段终态只由「成功数是否达标」+ 控制态决定（见下方池耗尽/控制态处理）。
         if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) {
           finalStatus = st;
           break;
         }
       }
+
+      // 补跑模型下的整阶段终态判定：
+      //   - 只要「尝试节点数达到 targetCount」（失败已被自动补跑填满，无缺口）且至少成功 1 个，
+      //     整阶段视为完成；
+      //   - 出现真实缺口（可用池不够 targetCount）或「一个都没成功」→ 阶段 FAILED。
+      const reachedTarget = usedOrder.length >= targetCount;
+      if (!reachedTarget || successCount === 0) {
+        if (finalStatus !== TaskStatus.PAUSED && finalStatus !== TaskStatus.STOPPED) {
+          emit(P.makeProgress({
+            taskId: config.taskId,
+            type: EventType.WIFI_POLL,
+            message: '【谷歌阶段】未跑满目标：成功 ' + successCount + '/' + targetCount +
+              ' 个' + (reachedTarget ? '（节点全失败）' : '，可用池已耗尽，缺口 ' + (targetCount - usedOrder.length) + ' 个'),
+          }));
+          finalStatus = TaskStatus.FAILED;
+        }
+      }
+
       statsMod.recordVpn(run, {
         availableCount: diag.available.length,
         total: diag.total,
-        usedNode: diag.available[0],
+        // 真实首个成功节点（取代旧版硬编码 available[0]，避免受限 AUTOCLAW_GOOGLE_MAX_NODES 时显示不准）
+        usedNode: firstSuccessNode || (usedOrder.length ? usedOrder[0] : null),
+        usedCount: successCount,
+        targetCount: targetCount,
         proxyUrl: diag.proxyUrl,
         availableDetail: diag.availableDetail || null,
         polledBy: 'node',
