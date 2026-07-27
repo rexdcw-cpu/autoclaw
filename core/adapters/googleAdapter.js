@@ -640,9 +640,24 @@ class GoogleAdapter extends PlatformAdapter {
       await page
         .waitForSelector('#rso', { state: 'visible', timeout: 15000 })
         .catch(() => {});
+      // 翻页后可能落到验证/同意页：重新检测并抛出明确错误，避免被误判为「0 外链」
+      if (await this._isCaptchaPage(page)) {
+        throw new Error('谷歌验证拦截（ERR_GOOGLE_CAPTCHA）：翻页后命中异常流量验证页，结果页未加载');
+      }
+      if (await this._isConsentPage(page)) {
+        throw new Error('谷歌同意页拦截（ERR_GOOGLE_CONSENT）：翻页后落到同意页，结果页未加载');
+      }
     }
 
-    // ── 诊断：给出可操作的失败原因（并附实际看到的域名，便于确认是否排名问题）──
+    // ── 诊断：给出可操作的失败原因（并附实际看到的域名 / 当前页态，便于确认是排名问题还是拦截）──
+    let url = '';
+    try { url = page.url() || ''; } catch (e) {}
+    let snippet = '';
+    try {
+      snippet = (await page.evaluate(() =>
+        ((document.body && document.body.innerText) || '').slice(0, 200)
+      )) || '';
+    } catch (e) {}
     const seenDomains = [
       ...new Set(
         allParsed
@@ -660,7 +675,7 @@ class GoogleAdapter extends PlatformAdapter {
     if (!anyDomain) {
       const seenPart = seenDomains.length
         ? `。已扫描 ${scannedPages} 页实际看到的域名（前 20）：${seenDomains.slice(0, 20).join('、')}`
-        : `（${scannedPages} 页均未解析到任何外链，可能结果页结构变化或命中拦截页）`;
+        : `（${scannedPages} 页均未解析到任何外链；当前页 URL=${url}；页面片段="${snippet.replace(/\s+/g, ' ').slice(0, 120)}"——可能该节点出口 IP 区域下 Google 返回零结果 / 受限结果页或拦截页）`;
       throw new Error(
         `[locateTarget] 目标域名「${target.domain}」未出现在已扫描的 ${scannedPages} 页搜索结果中` +
           seenPart +
