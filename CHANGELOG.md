@@ -4,6 +4,18 @@
 
 ---
 
+## [0.3.37] — 2026-07-28
+
+### Fixed（谷歌结果解析兜底）
+- **谷歌 SERP 解析第三层兜底**：`googleAdapter._parseResultAnchors` 原仅用 2026 新版选择器（`#rso a[data-ved]` 容器）与旧版（`#rso h3 a`）。在部分节点出口 IP 区域返回的**区域化 / 未完全加载** SERP 下，两个选择器均匹配不到结果链接，导致 `locateTarget` 误报「N 页均未解析到任何外链」而失败（页面片段明明有结果文本，属解析层选择性失效，非纯排名问题）。
+  - 新增第三层：`NEW`/`OLD` 均空时，直接从 `#rso a[href]` 提取所有真实外链，由 href 解析 + `matchTarget` 域名匹配过滤噪声。该节点即可正常命中目标站，单节点失败被消除（v0.3.34 补跑模型也已能正确吸收）。
+- 新增单测 `locateTarget(): v0.3.37 fallback — NEW/OLD empty but #rso a[href] holds target`（`test/googleAdapter.test.js`，现 25 例全过）。
+
+### 备注
+- 整体「完成度总结」仍按 `taskStats` 既有逻辑：存在任何 `failed` 子记录即标 `failed`（行 136）。本次修复针对根因（消除该节点失败），修复后该节点不再 failed，整体即 `completed`。若后续希望「偶发单节点失败（已被补跑吸收）不拉垮整体结论」，可再增强 `taskStats.summary.status` 判定，需 Master 确认。
+
+---
+
 ## [0.3.36] — 2026-07-27
 
 ### Fixed / Optimized（P1 + P24）

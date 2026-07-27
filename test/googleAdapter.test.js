@@ -221,6 +221,9 @@ function makeGooglePage(opts = {}) {
       }
       // 旧版 #rso h3 a
       if (sel === '#rso h3 a') return (curPage().anchors || []).slice();
+      // 第三层兜底（v0.3.37）：区域化 / 未完全加载 SERP 下 NEW/OLD 失效时，
+      // 直接从 #rso a[href] 提取真实外链
+      if (sel === '#rso a[href]' && opts.genericAnchors) return (opts.genericAnchors || []).slice();
       return [];
     },
   };
@@ -473,6 +476,30 @@ test('locateTarget(): no target domain in top 10 → throws diagnostic error', a
     () => adapter.locateTarget(page, { domain: 'manincorp.cn', titleKeywords: ['万年移民'] }),
     /目标域名「manincorp.cn」未出现在已扫描的 1 页搜索结果中/,
     'should diagnose missing domain with actionable message'
+  );
+});
+
+test('locateTarget(): v0.3.37 fallback — NEW/OLD empty but #rso a[href] holds target', async () => {
+  const adapter = new GoogleAdapter();
+  // 模拟区域化 / 未完全加载的 SERP：不提供 newStyleAnchors / resultAnchors，
+  // 使 NEW(#rso a[data-ved]) 与 OLD(#rso h3 a) 选择器均抓空，仅靠第三层 #rso a[href] 兜底。
+  const { page, calls } = makeGooglePage({
+    genericAnchors: [
+      makeAnchor('其他无关站点', 'https://other-site.com/'),
+      makeAnchor('万年移民局官网首页', 'https://www.manincorp.cn/'),
+    ],
+  });
+
+  const href = await adapter.locateTarget(page, {
+    domain: 'manincorp.cn',
+    titleKeywords: ['万年移民'],
+  });
+
+  assert.ok(calls.$$.includes('#rso a[href]'), 'should fall back to generic #rso a[href] third layer');
+  assert.strictEqual(
+    href,
+    'https://www.manincorp.cn/',
+    'third-layer fallback should still resolve and match the target domain'
   );
 });
 

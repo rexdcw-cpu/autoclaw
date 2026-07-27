@@ -536,6 +536,11 @@ class GoogleAdapter extends PlatformAdapter {
     if (!anchors || anchors.length === 0) {
       anchors = await page.$$(RESULT_TITLE_LINK_OLD);
     }
+    // 第三层兜底（v0.3.37）：兼容区域化 / 未完全加载的 SERP —— NEW/OLD 选择器均未匹配时，
+    // 直接从 #rso 提取所有带 href 的 <a>，后续由 href 解析 + matchTarget 域名匹配过滤噪声。
+    if (!anchors || anchors.length === 0) {
+      anchors = await page.$$('#rso a[href]');
+    }
 
     // 安全读取元素属性/文本（部分 mock 元素可能未实现对应方法）
     const safeText = async (el) => {
