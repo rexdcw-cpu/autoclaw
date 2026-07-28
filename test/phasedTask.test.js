@@ -394,6 +394,56 @@ test('分阶段：谷歌某节点失败自动换备选节点补跑，最终成�
 });
 
 // ---------------------------------------------------------------------------
+// 10) 节点内重试（v0.3.38）：单个节点首次 FAILED（如 VPN 瞬时抖动）→ 在该节点
+//     上自动重跑，重试成功即计入，且不额外消耗备选池槽位
+// ---------------------------------------------------------------------------
+test('分阶段：谷歌节点首次失败自动节点内重试，重试成功计入且不消耗额外池', async () => {
+  let n1Calls = 0;
+  const engineFactory = (config, emit) => ({
+    run: async (roundsOverride, opts) => {
+      const node = (opts && opts.vpnPreset && opts.vpnPreset.node) || null;
+      if (node === 'N1') {
+        n1Calls += 1;
+        if (n1Calls === 1) return TaskStatus.FAILED; // 首次失败触发重试
+        return TaskStatus.COMPLETED;                 // 重试成功
+      }
+      return TaskStatus.COMPLETED;
+    },
+    setPause() {},
+    setStop() {},
+  });
+  const wifi = makeWifi(['A'], 'A');
+  const vpn = makeVpn(['N1', 'N2']);
+  const stats = makeFakeStats();
+  const vpnLauncher = makeFakeVpnLauncher();
+  const rounds = [{ roundIndex: 0, totalRounds: 1, platform: 'google', keyword: 'k1' }];
+  const cfg = buildConfig(['google'], rounds, false, []);
+
+  const events = [];
+  const status = await runTask(cfg, (e) => events.push(e), {
+    wifi, engineFactory, vpn, statsModule: stats, vpnLauncher,
+    sleep: async () => {}, retrySleep: async () => {},
+  });
+
+  const googleRun = stats.runs.find((r) => r.platform === 'google');
+  assert.strictEqual(status, TaskStatus.COMPLETED, '整体应 completed');
+  // N1 重试成功（不标 failed），N2 一次成功 → 全部 completed
+  const n1 = googleRun.perWifi.find((w) => w.ssid === 'N1');
+  const n2 = googleRun.perWifi.find((w) => w.ssid === 'N2');
+  assert.ok(n1, '应记录 N1');
+  assert.ok(n2, '应记录 N2');
+  assert.strictEqual(n1.status, 'completed', 'N1 重试成功后应为 completed（非 failed）');
+  assert.strictEqual(n1.attempts, 2, 'N1 应尝试 2 次（1 首 + 1 重试）');
+  assert.strictEqual(n1.retriesUsed, 1, 'N1 应记录 1 次重试');
+  assert.strictEqual(n2.status, 'completed', 'N2 一次成功');
+  assert.strictEqual(n2.attempts, 1, 'N2 应只尝试 1 次（无重试）');
+  // 节点内重试不额外消耗备选池：仅 N1、N2 两条记录，未冒出 N3
+  assert.strictEqual(googleRun.perWifi.length, 2, '应只有 2 条记录（节点内重试不新增池槽）');
+  assert.strictEqual(googleRun.vpn.usedCount, 2, '成功节点数应为 2');
+  assert.strictEqual(googleRun.summary.totalRetries, 1, '累计重试应为 1');
+});
+
+// ---------------------------------------------------------------------------
 // 8) 备选池耗尽仍不足目标数：记成功数，不崩溃
 // ---------------------------------------------------------------------------
 test('分阶段：谷歌所有节点均失败→成功数不足目标、不崩溃、整阶段 FAILED', async () => {

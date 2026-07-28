@@ -334,6 +334,13 @@ async function runPhased(config, emit, deps) {
       let successCount = 0;
       let firstSuccessNode = null;
       let pollIndex = 0;
+      // 节点内重试：单个节点 FAILED（动作超时 / VPN 抖动 / 区域化解析失败等瞬时故障）后，
+      // 在该节点上重跑 AUTOCLAW_GOOGLE_NODE_RETRIES 次（默认 2，共最多 3 次尝试），任一次成功即计入；
+      // 全失败才丢弃，避免 VPN 节点瞬时抖动被直接判死、拉低整体完成率。
+      const nodeRetries = Math.max(0, Number(process.env.AUTOCLAW_GOOGLE_NODE_RETRIES) || 2);
+      // 谷歌专用单动作超时（默认 60s，远低于全局 150s）：死节点更快超时、更快进入重试，
+      // 不影响验证码轮询（谷歌验证码等待用独立 CAPTCHA_POLL_INTERVAL 循环，不依赖 actionTimeoutMs）。
+      const googleTimeoutMs = Number(process.env.AUTOCLAW_GOOGLE_ACTION_TIMEOUT) || 60000;
 
       while (successCount < targetCount && pool.length > 0) {
         const node = pool.shift();
@@ -351,25 +358,45 @@ async function runPhased(config, emit, deps) {
           proxyUrl: diag.proxyUrl,
           availableDetail: diag.availableDetail || null,
         };
-        const eng = makeEngine(config, phasedEmit);
-        engine = eng;
-        emit(P.makeProgress({
-          taskId: config.taskId,
-          type: EventType.WIFI_POLL,
-          message: '【谷歌阶段】节点轮询 ' + pollIndex + '：切至『' + node + '』开始谷歌流程' +
-            (pool.length > 0 ? '（剩余备选 ' + pool.length + ' 个）' : ''),
-          wifiIndex: pollIndex,
-          wifiTotal: targetCount,
-        }));
-        const gT0 = Date.now();
-        const st = await eng.run(googleRounds, { vpnPreset: preset });
-        const gT1 = Date.now();
+        // 节点内重试循环：该节点最多尝试 nodeRetries+1 次（含首次），任一次成功即停。
+        let nodeAttempt = 0;
+        let st = TaskStatus.FAILED;
+        let nodeErr = null;
+        let gT0 = 0;
+        let gT1 = 0;
+        while (nodeAttempt <= nodeRetries) {
+          nodeAttempt += 1;
+          // 给谷歌单独注入更短的单动作超时（不影响百度 150s 验证码余量）。
+          const gConfig = Object.assign({}, config, {
+            strategy: Object.assign({}, config.strategy, { actionTimeoutMs: googleTimeoutMs }),
+          });
+          const eng = makeEngine(gConfig, phasedEmit);
+          engine = eng;
+          emit(P.makeProgress({
+            taskId: config.taskId,
+            type: EventType.WIFI_POLL,
+            message: '【谷歌阶段】节点轮询 ' + pollIndex + '：切至『' + node + '』开始谷歌流程' +
+              (pool.length > 0 ? '（剩余备选 ' + pool.length + ' 个）' : '') +
+              (nodeAttempt > 1 ? '（节点内第 ' + nodeAttempt + ' 次尝试）' : ''),
+            wifiIndex: pollIndex,
+            wifiTotal: targetCount,
+          }));
+          gT0 = Date.now();
+          const stRun = await eng.run(googleRounds, { vpnPreset: preset });
+          gT1 = Date.now();
+          st = stRun;
+          nodeErr = (eng && eng.lastErrorDetail) ? eng.lastErrorDetail : String(stRun);
+          if (st === TaskStatus.COMPLETED) break;            // 成功即停
+          if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) break; // 控制态不重试
+          if (abort) { finalStatus = worstStatus(finalStatus, abortStatus); break; }
+          await retryWait(RETRY_GAP_MS); // 重试前短暂停顿，避免瞬时抖动叠加
+        }
         const recStatus = st === TaskStatus.COMPLETED
           ? 'completed'
           : (st === TaskStatus.FAILED ? 'failed' : st);
         statsMod.recordWifi(run, {
           ssid: node, via: 'vpn', status: recStatus,
-          attempts: 1, retriesUsed: 0,
+          attempts: nodeAttempt, retriesUsed: Math.max(0, nodeAttempt - 1),
           startedAt: new Date(gT0).toISOString(), endedAt: new Date(gT1).toISOString(),
           durationMs: Math.max(0, gT1 - gT0),
           found: !!(engine && engine.foundTarget),
@@ -377,14 +404,13 @@ async function runPhased(config, emit, deps) {
           captcha: !!(engine && engine.captchaHit),
           error: st === TaskStatus.COMPLETED
             ? null
-            : (engine && engine.lastErrorDetail ? engine.lastErrorDetail : String(st)),
+            : nodeErr,
         });
         if (st === TaskStatus.COMPLETED) {
           successCount += 1;
           if (!firstSuccessNode) firstSuccessNode = node;
         }
-        // 补跑模型：单个节点失败已被自动换成备选节点补跑，不应据此把整阶段判 FAILED；
-        // 整阶段终态只由「成功数是否达标」+ 控制态决定（见下方池耗尽/控制态处理）。
+        // 控制态（暂停/停止）优先，立即跳出整阶段
         if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) {
           finalStatus = st;
           break;

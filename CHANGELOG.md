@@ -4,6 +4,18 @@
 
 ---
 
+## [0.3.38] — 2026-07-28
+
+### Fixed（谷歌节点失败率高 — 节点内重试 + 降低单动作超时）
+- **节点内重试（核心修复）**：`scripts/worker.js` 谷歌阶段原「遍历所有可用节点、失败即弃、无节点内重试」，导致 VPN 节点瞬时抖动 / 区域化解析失败被直接判死、整体完成率仅 63%（`bed32432` 轮：16 节点 10 完成 6 失败、累计重试 0）。现每个节点 FAILED 后在该节点上自动重跑 `AUTOCLAW_GOOGLE_NODE_RETRIES`（默认 2，共最多 3 次尝试），任一次成功即计入；全失败才丢弃。重试前 `retryWait(RETRY_GAP_MS)` 短暂停顿避免瞬时抖动叠加。
+- **谷歌专用单动作超时**：新增 `AUTOCLAW_GOOGLE_ACTION_TIMEOUT`（默认 60000ms）。原 `actionTimeoutMs` 全局默认 150000ms（百度为保验证码人工等待余量所需），但谷歌单动作卡死要等 150s 才超时，拖垮整体。现给谷歌单独注入更短超时（验证码轮询用独立 `CAPTCHA_POLL_INTERVAL` 循环、不依赖 `actionTimeoutMs`，故降超时不影响验证码等待）。
+- 统计：节点内重试如实记录 `attempts` / `retriesUsed`，`taskStats` 汇总 `totalRetries` 反映真实重试量（此前恒为 0）。
+- 新增单测 `分阶段：谷歌节点首次失败自动节点内重试…`（`test/phasedTask.test.js`，现 10 例全过）。
+
+### 环境变量新增
+- `AUTOCLAW_GOOGLE_NODE_RETRIES`：单谷歌节点失败后的节点内重试次数（默认 2）。
+- `AUTOCLAW_GOOGLE_ACTION_TIMEOUT`：谷歌单动作超时毫秒（默认 60000；百度仍用全局 `AUTOCLAW_ACTION_TIMEOUT`=150000）。
+
 ## [0.3.37] — 2026-07-28
 
 ### Fixed（谷歌结果解析兜底）
