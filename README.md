@@ -100,9 +100,9 @@ sudo apt-get install -y libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
 export AUTOCLAW_TOKEN=your-secret-token
 export PORT=7788
 
-# 5. 启动
-node app.js
-# 或（进程保活）setsid nohup node app.js > logs/app.log 2>&1 &
+# 5. 启动（⚠️ 本机/单机无 MySQL 时务必带 AUTOCLAW_DB_TYPE=sqlite，否则默认 mysql 会连 localhost:3306 失败）
+AUTOCLAW_DB_TYPE=sqlite AUTOCLAW_TOKEN=autoclaw-dev PORT=7788 node app.js
+# 或（进程保活）setsid nohup env AUTOCLAW_DB_TYPE=sqlite AUTOCLAW_TOKEN=autoclaw-dev PORT=7788 node app.js > logs/app.log 2>&1 &
 ```
 
 > 说明：生产部署沿用现有 `start.sh`（`setsid + nohup` 保活）与 `ecosystem.config.js`（PM2）。
@@ -118,18 +118,24 @@ node app.js
 | `AUTOCLAW_TITLE_KEYWORDS` | `万年移民` | 默认标题关键词（表单预填） |
 | `AUTOCLAW_STAY_SECONDS` / `_SCROLL_UP` / `_SCROLL_DOWN` / `_AMP_MIN` / `_AMP_MAX` / `_INTERVAL_MIN` / `_INTERVAL_MAX` | 见 `config/defaults.js` | 拟人参数覆盖 |
 | `AUTOCLAW_MODE` / `_FAIL_RATE` / `_MAX_RETRY` / `_ACTION_TIMEOUT` | `serial` / `0.3` / `2` / `30000` | 策略参数覆盖 |
+| `AUTOCLAW_GOOGLE_NODE_RETRIES` | `2` | 谷歌单节点失败后节点内重试次数（最多 1+重试 次尝试），救回 VPN 瞬时抖动 / 解析失败 |
+| `AUTOCLAW_GOOGLE_ACTION_TIMEOUT` | `60000` | 谷歌单动作超时（毫秒）；百度仍用全局 `AUTOCLAW_ACTION_TIMEOUT`(150000)，谷歌单独降超时避免单动作卡死拖垮整体 |
+| `AUTOCLAW_GOOGLE_PERSIST_PROFILE` | 关（设 `1` 开启） | 谷歌阶段复用固定 `data/google-profile` 累积 cookie / 浏览历史，建身份显著降低机器人验证触发（首次空身份、随运行渐进生效） |
+| `AUTOCLAW_GOOGLE_AVOID_HOT_NODES` | `1`（开启） | 谷歌软降权高标记共享 VPN 节点（如热门 GPT 出口），将其移到节点池末尾、优先用低标记节点；设 `0` 关闭 |
+| `AUTOCLAW_GOOGLE_AVOID_NODE_PATTERN` | `/GPT/i` | 软降权匹配模式（正则），命中则降权；可被自定义正则覆盖 |
 
 ---
 
 ## Windows 部署（T-D5 · 路线 A：本机可见窗口）
 
-服务主进程迁到 Windows 原生运行；MySQL 仍留在 WSL，经 `localhost:3306` 访问
-（`AUTOCLAW_DB_HOST` 默认 `localhost`）。浏览器使用本机已安装的 **Chrome**，
-以**真实可见窗口**运行（无需安装 Playwright 的 Chromium）。
+服务主进程在 Windows 原生运行，数据库用 **SQLite 本地免服务器**（开箱即用，启动自动建表 `data/autoclaw.db`，无需安装 MySQL）。
+浏览器使用本机已安装的 **Chrome**，以**真实可见窗口**运行（无需安装 Playwright 的 Chromium）。
+
+> 若需接远程 / 服务器 MySQL，设 `AUTOCLAW_DB_TYPE=mysql` 并先执行 `scripts/schema.sql`（非本机测试默认路径）。
 
 ### 前置条件
 - Windows 10/11 + Node.js ≥ 18 + 已安装 Chrome（稳定版）。
-- WSL2 中 MySQL 已启动，且 `autoclaw` 库已执行 `scripts/schema.sql`。
+- （可选）若用 MySQL 后端：`AUTOCLAW_DB_TYPE=mysql` 且目标库已执行 `scripts/schema.sql`；**本地测试用默认 SQLite 无需此步**。
 - 已 `npm install`（含 express / socket.io / playwright / mysql2；无需 `npx playwright install chromium`）。
 
 ### 快速启动（start-win.bat）
@@ -158,7 +164,7 @@ node app.js
 ### 关键变化（相对 WSL 无头部署）
 - `core/browserSession.js` 改为 `chromium.launch({ headless:false, channel:'chrome', userDataDir:<隔离临时目录> })`，
   并移除 `--no-sandbox` / `--disable-setuid-sandbox`；可选 `AUTOCLAW_CHROME_PATH` 指定 Chrome。
-- 数据库仍在 WSL，连接串用 `AUTOCLAW_DB_HOST=localhost`（WSL2 的 localhost 转发可达 127.0.0.1:3306）。
+- 数据库用本地 SQLite（免服务器，启动自动建表 `data/autoclaw.db`）；如需 MySQL 后端，用 `AUTOCLAW_DB_HOST` 等变量指向目标实例（默认 `localhost:3306`）。
 - worker / taskManager / taskEngine 逻辑保持不变；本机 Chrome 窗口即「可见窗口」，不做截图流（T-D5 范畴）。
 - 每个任务使用独立的临时 `userDataDir`，任务结束随浏览器关闭释放，不污染本机默认 Chrome profile。
 
@@ -169,9 +175,16 @@ node app.js
 | `AUTOCLAW_DB_PORT` | `3306` | |
 | `AUTOCLAW_DB_USER` / `AUTOCLAW_DB_PASSWORD` / `AUTOCLAW_DB_NAME` / `AUTOCLAW_DB_LIMIT` | `root` / `''` / `autoclaw` / `10` | 同前 |
 | `AUTOCLAW_CHROME_PATH` | 空（自动探测） | 可选，指定本机 Chrome 可执行文件路径 |
-| `AUTOCLAW_DB_TYPE` | `sqlite` | 持久化后端：`sqlite`=本地免服务器（启动自动建表 `data/autoclaw.db`）；`mysql`=连 WSL/远程 MySQL（需先跑 `scripts/schema.sql`） |
+| `AUTOCLAW_DB_TYPE` | `mysql`（**本地测试须显式设 `sqlite`**） | 持久化后端：不设置则默认 `mysql` 并尝试连 `localhost:3306`；本机无 MySQL 时必须设 `sqlite`（本地免服务器，启动自动建表 `data/autoclaw.db`）。`start-win.bat` 已内置该设置 |
 | `AUTOCLAW_SQLITE_PATH` | 空（默认 `data/autoclaw.db`） | 仅 `sqlite` 模式生效，指定 SQLite 文件路径 |
 
+### 注意事项（部署 / 测试必读）
+
+- **启动必须带 `AUTOCLAW_DB_TYPE=sqlite`**：本机 / 单机测试无 MySQL，若不设置该变量将默认走 `mysql` 并尝试连接 `localhost:3306`，导致任务提交落库失败（`ECONNREFUSED`）。`start-win.bat` 已内置此设置；手动 `node app.js` 时需自行带上（见上方「本地 / WSL 安装」第 5 步）。
+- **谷歌持久 profile（`AUTOCLAW_GOOGLE_PERSIST_PROFILE=1`）**：开启后谷歌阶段复用固定 `data/google-profile` 累积 cookie / 浏览历史，显著降低谷歌机器人验证触发。该 profile **每台机器独立、含登录态**，已在 `.gitignore` 排除、请勿提交入库；多实例并行跑任务时不要共享同一 profile 目录，以免锁竞争。其效果随 cookie 累积**渐进显现**（首次运行接近空身份，多跑几轮越来越稳）。
+- **高标记节点软降权（默认开启）**：谷歌默认把热门共享 VPN 出口（如名称含 `GPT` 的节点）移到节点池末尾、优先用低标记节点，降低被谷歌标记的出口。可用 `AUTOCLAW_GOOGLE_AVOID_HOT_NODES=0` 关闭，或用 `AUTOCLAW_GOOGLE_AVOID_NODE_PATTERN=<regex>` 调整匹配模式。
+- **谷歌机器人验证需人工过码**：极少数情况下仍会触发「异常流量验证拦截」——此时程序会在弹出的 Chrome 窗口中等待，请在可见窗口内手动完成验证，程序检测通过后会自动继续。该提示已降噪（每节点至多提示一次 + 周期性提醒），不会刷屏。
+- **运行数据不入版本库**：`data/google-profile/`、`data/*.db`、`data/task-stats-*.{json,md}`、`logs/*.log` 等均为运行产物，已在 `.gitignore` 排除，请勿提交。
 
 ---
 
