@@ -17,6 +17,7 @@
  * 站内寻找「联系/关于」页并做上滑/下滑（随机幅度 300–800px、随机间隔 1–2s）。
  */
 
+const path = require('path');
 const { BrowserSession } = require('./browserSession');
 const { BaiduAdapter } = require('./adapters/baiduAdapter');
 const { GoogleAdapter } = require('./adapters/googleAdapter');
@@ -83,11 +84,30 @@ class TaskEngine {
   constructor(config, emit, opts) {
     this.config = config;
     this.emit = typeof emit === 'function' ? emit : () => {};
-    this.adapters = { baidu: new BaiduAdapter(), google: new GoogleAdapter() };
+    this.adapters = {
+      baidu: new BaiduAdapter(),
+      // 谷歌适配器：命中验证码/异常流量拦截时（即使随后自动恢复）回调置位 captchaHit，
+      // 让 worker 写入 perWifi.captcha，统计如实反映「真实触发频次」而非只记失败路径。
+      google: new GoogleAdapter({
+        onCaptcha: (detail) => {
+          this.captchaHit = true;
+        },
+      }),
+    };
     /** @type {import('playwright').BrowserContext|null} */
     this.ctx = null;
     // VPN 控制器（可注入，便于单测；默认对接本机 Mihomo Party 控制 API）
     this.vpn = (opts && opts.vpn) || VpnController;
+    // v0.3.40：推断平台（用于谷歌持久 profile 等平台专属行为）
+    this._platform =
+      (this.config.platforms && this.config.platforms[0]) ||
+      (this.config.rounds && this.config.rounds[0] && this.config.rounds[0].platform) ||
+      'baidu';
+    // 谷歌阶段且开启开关时，复用固定 profile 目录累积 cookie 历史（降验证码）
+    this._googleProfileDir =
+      this._platform === 'google' && process.env.AUTOCLAW_GOOGLE_PERSIST_PROFILE === '1'
+        ? path.join(process.cwd(), 'data', 'google-profile')
+        : null;
 
     // 控制信号（由 manager 经 IPC control 消息设置）
     this.shouldPause = false;
@@ -184,7 +204,7 @@ class TaskEngine {
     let finalStatus = TaskStatus.COMPLETED;
     try {
       const initialProxy = this._initialProxyFor();
-      await session.launch(initialProxy);
+      await session.launch(initialProxy, this._googleProfileDir ? { userDataDir: this._googleProfileDir } : undefined);
       this.ctx = await session.newContext();
       this._usingVpn = !!(initialProxy && initialProxy.httpProxy);
     } catch (e) {
@@ -266,7 +286,7 @@ class TaskEngine {
     } catch (e) {
       /* 关闭失败不阻塞，下面 launch 会兜底 */
     }
-    await this.session.launch(proxy);
+    await this.session.launch(proxy, this._googleProfileDir ? { userDataDir: this._googleProfileDir } : undefined);
     this.ctx = await this.session.newContext();
     this._usingVpn = !!(proxy && proxy.httpProxy);
   }
@@ -424,6 +444,14 @@ class TaskEngine {
    */
   async runRound(plan) {
     const taskId = this.config.taskId;
+
+    // 每轮复位验证码命中标记与上报护栏：captchaHit 仅代表「本轮」是否触发，
+    // 避免上一轮置位后串味到后续节点（旧实现在构造函数只复位一次，会导致
+    // 一旦某轮命中、全任务所有节点都被误记为 captcha）。
+    this.captchaHit = false;
+    if (this.adapters && this.adapters.google && this.adapters.google.resetCaptchaNotify) {
+      this.adapters.google.resetCaptchaNotify();
+    }
 
     // 切入该轮前，确保浏览器网络与该平台匹配（百度无代理 / 谷歌走 VPN 出口）。
     // 返回 false 表示该轮应跳过（如 VPN 无可用节点），不计入失败率。

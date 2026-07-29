@@ -330,6 +330,25 @@ async function runPhased(config, emit, deps) {
       // 逐个取 pool 头节点跑谷歌；成功则计入成功数；失败则记 failed 并自动从 pool 取下一个补跑；
       // 直到成功数达标（targetCount）或 pool 耗尽（不留缺口，有多少成功算多少）。
       const pool = diag.available.slice();
+      // v0.3.40：谷歌软降权高标记共享节点（如 [HK]香港直连HK3 GPT 这类热门出口最易被 Google 标记）。
+      // 默认开启：把命中模式的节点移到 pool 末尾，优先用低标记节点；若前面成功数已达标，高标记节点不会被使用。
+      // 设 AUTOCLAW_GOOGLE_AVOID_HOT_NODES=0 关闭；AUTOCLAW_GOOGLE_AVOID_NODE_PATTERN 可覆盖匹配模式（默认 /GPT/i）。
+      if (process.env.AUTOCLAW_GOOGLE_AVOID_HOT_NODES !== '0') {
+        const avoidPat = process.env.AUTOCLAW_GOOGLE_AVOID_NODE_PATTERN
+          ? new RegExp(process.env.AUTOCLAW_GOOGLE_AVOID_NODE_PATTERN, 'i')
+          : /GPT/i;
+        const hot = pool.filter((n) => avoidPat.test(n));
+        if (hot.length) {
+          const safe = pool.filter((n) => !avoidPat.test(n));
+          pool.length = 0;
+          pool.push(...safe, ...hot);
+          emit(P.makeProgress({
+            taskId: config.taskId,
+            type: EventType.VPN_INFO,
+            message: '【谷歌阶段】已软降权 ' + hot.length + ' 个高标记节点（移至末尾）：' + hot.join('、'),
+          }));
+        }
+      }
       const usedOrder = [];
       let successCount = 0;
       let firstSuccessNode = null;
@@ -369,6 +388,10 @@ async function runPhased(config, emit, deps) {
           // 给谷歌单独注入更短的单动作超时（不影响百度 150s 验证码余量）。
           const gConfig = Object.assign({}, config, {
             strategy: Object.assign({}, config.strategy, { actionTimeoutMs: googleTimeoutMs }),
+            // v0.3.42：钉死平台为 google，确保持久 profile 等平台专属行为命中。
+            // 否则 taskEngine 取 config.rounds[0].platform（百度排第一）→ _platform 误判为
+            // 'baidu' → _googleProfileDir 始终为 null，AUTOCLAW_GOOGLE_PERSIST_PROFILE 形同虚设。
+            platforms: ['google'],
           });
           const eng = makeEngine(gConfig, phasedEmit);
           engine = eng;
@@ -439,6 +462,8 @@ async function runPhased(config, emit, deps) {
         total: diag.total,
         // 真实首个成功节点（取代旧版硬编码 available[0]，避免受限 AUTOCLAW_GOOGLE_MAX_NODES 时显示不准）
         usedNode: firstSuccessNode || (usedOrder.length ? usedOrder[0] : null),
+        // 实际尝试过的完整节点列表（按尝试顺序，含成功/失败），用于报告「选用节点」如实展示全部实跑节点
+        usedNodes: usedOrder.slice(),
         usedCount: successCount,
         targetCount: targetCount,
         proxyUrl: diag.proxyUrl,

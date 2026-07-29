@@ -134,8 +134,37 @@ function _decodeGoogleRedirect(href) {  if (!href || typeof href !== 'string') r
 }
 
 class GoogleAdapter extends PlatformAdapter {
-  constructor() {
+  /**
+   * @param {{onCaptcha?: (detail:string)=>void}} [opts]
+   *   onCaptcha：命中谷歌异常流量/验证码拦截时回调（即使随后自动恢复也回调一次），
+   *   供 taskEngine 如实记入 perWifi.captcha，避免「拦截页闪现又恢复」被统计漏记。
+   */
+  constructor(opts) {
     super('google');
+    this._onCaptcha = (opts && opts.onCaptcha) || null;
+    // 本轮「是否已上报过验证码事件」的护栏：同一轮内只上报一次，避免轮询里每 2s 重复上报。
+    this._captchaNotified = false;
+  }
+
+  /**
+   * 命中验证码/异常流量拦截时上报一次（幂等：同一轮只上报一次）。
+   * @param {string} reason 触发原因（sorry URL / 拦截文案片段）
+   */
+  _notifyCaptcha(reason) {
+    if (this._captchaNotified) return;
+    this._captchaNotified = true;
+    if (this._onCaptcha) {
+      try {
+        this._onCaptcha(reason || 'google.com/sorry');
+      } catch (e) {
+        /* 回调异常不影响主流程 */
+      }
+    }
+  }
+
+  /** 每轮开始时由调用方（taskEngine）调用，重置上报护栏 */
+  resetCaptchaNotify() {
+    this._captchaNotified = false;
   }
 
   /**
@@ -252,8 +281,10 @@ class GoogleAdapter extends PlatformAdapter {
       const t = await page.evaluate(
         () => ((document.body && document.body.innerText) || '').toLowerCase()
       );
+      // 注意：特意「不」匹配裸词 robot（正常结果页 snippet 可能含 "robot" 造成误判），
+      // 只匹配谷歌拦截页特有短语，降低误报导致的虚假验证码事件。
       if (
-        /unusual traffic|异常流量|please show you|confirm you are a human|our systems have detected|robot|sorry\/index/.test(
+        /unusual traffic|异常流量|please show you|confirm you are a human|our systems have detected|sorry\/index/.test(
           t
         )
       ) {
@@ -272,11 +303,17 @@ class GoogleAdapter extends PlatformAdapter {
    * @param {() => Promise<void>} [onSolved]
    */
   async _pollCaptcha(page, onSolved) {
+    // 进入验证码等待即上报一次（即使随后自动恢复也记一笔，供统计如实反映真实频次）
+    this._notifyCaptcha('google.com/sorry 拦截页');
     let elapsed = 0;
+    let lastPrompt = -30000; // 首次立即提示，之后每 30s 提醒一次（不再每 2s 刷屏）
     while (elapsed < CAPTCHA_WAIT_MS) {
-      console.warn(
-        '谷歌异常流量验证拦截：请在弹出的 Chrome 窗口中手动完成验证，程序将在验证通过后自动继续'
-      );
+      if (elapsed - lastPrompt >= 30000) {
+        console.warn(
+          '谷歌异常流量验证拦截：请在弹出的 Chrome 窗口中手动完成验证，程序将在验证通过后自动继续'
+        );
+        lastPrompt = elapsed;
+      }
       await page.waitForTimeout(CAPTCHA_POLL_INTERVAL);
       elapsed += CAPTCHA_POLL_INTERVAL;
       if (!(await this._isCaptchaPage(page))) {
@@ -440,6 +477,7 @@ class GoogleAdapter extends PlatformAdapter {
     // 步骤D（轮询）：提交后可能落到同意页 / 异常流量验证码页，或结果仍在加载。
     // 轮询等待 #rso：结果出现即成功；同意页则点同意；验证码页则提示用户手动过码。
     let elapsed = 0;
+    let captchaPrompted = false; // 同一轮内验证码提示只打印一次，避免每 2s 刷屏
     while (elapsed < CAPTCHA_WAIT_MS) {
       let hasResults = false;
       try {
@@ -457,10 +495,14 @@ class GoogleAdapter extends PlatformAdapter {
         // 同意页（提交后被重定向）：点击同意等待离开，继续轮询
         await this._handleConsent(page);
       } else if (await this._isCaptchaPage(page)) {
-        // 验证码页：提示用户手动过码，轮询等待其解决
-        console.warn(
-          '谷歌异常流量验证拦截：请在弹出的 Chrome 窗口中手动完成验证，程序将在验证通过后自动继续'
-        );
+        // 验证码页：上报一次（供统计）+ 仅首次打印可操作提示，轮询等待其解决
+        this._notifyCaptcha('提交搜索后命中 google.com/sorry 拦截页');
+        if (!captchaPrompted) {
+          captchaPrompted = true;
+          console.warn(
+            '谷歌异常流量验证拦截：请在弹出的 Chrome 窗口中手动完成验证，程序将在验证通过后自动继续'
+          );
+        }
       }
       // 否则页面仍在加载，继续轮询
       await page.waitForTimeout(CAPTCHA_POLL_INTERVAL);

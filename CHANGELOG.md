@@ -4,6 +4,73 @@
 
 ---
 
+## [0.3.42] — 2026-07-29
+
+### Fixed（谷歌持久 profile 形同虚设的真 bug）
+
+**目标**：v0.3.40 引入的 `AUTOCLAW_GOOGLE_PERSIST_PROFILE=1` 自上线起从未真正生效，导致谷歌阶段仍以临时 profile 运行，建身份降验证码的主手段落空。
+
+- **根因**：`taskEngine._platform` 取 `config.rounds[0].platform`（任务 rounds 中百度排第一）→ 谷歌引擎实例也被推断为 `'baidu'` → `_googleProfileDir` 恒为 `null`。`data/google-profile` 全盘不存在，无数次任务实跑均临时 profile。
+- **修复**：`worker.js` 谷歌阶段构造 `gConfig` 时显式钉死 `platforms: ['google']`，确保 `_platform` 正确为 `'google'`，`_googleProfileDir` 才指向 `data/google-profile`。
+- **影响**：修复后谷歌阶段才会真正复用固定 profile 累积 cookie 历史（此前 5164ea09 等任务的 0 验证码来自软降权 + 反检测一致性，持久 profile 主手段未参与）。
+- **不涉及验证码逻辑**：`captcha`/`captchaHit`/`captchaWifi`/`_pollCaptcha` 等字段与处理函数均未触碰。
+
+---
+
+## [0.3.41] — 2026-07-29
+
+### Fixed（统计报告「选用节点」如实展示全部实跑节点）
+
+**目标**：修复报告摘要「选用节点」只显示首个成功节点（如单个 JP 节点），误导为「仅用 1 个节点」，而实跑 15 个节点的语义偏差。
+
+- `worker.js` 谷歌阶段 `recordVpn` 调用新增 `usedNodes` 字段，承载 `usedOrder`（按尝试顺序、含成功/失败的全部实跑节点列表）。保留原 `usedNode`（首成功节点）不动，老单测断言不破。
+- `taskStats.js` `renderMarkdown` 的「选用节点」行改为优先展示 `usedNodes` 列表（≤10 个全列，>10 列前 8 + 省略），并标注「共尝试 N 个」，与「成功 X / 目标 Y 个」并列。
+- **不涉及验证码逻辑**：`captcha`/`captchaHit`/`captchaWifi`/`_pollCaptcha` 等字段与处理函数均未触碰。
+
+---
+
+## [0.3.40] — 2026-07-28
+
+### Added（谷歌验证码频发的两个根治杠杆）
+
+**目标**：在 v0.3.39（统计/日志/反检测一致性）基础上，进一步降低谷歌「异常流量」拦截频次。两个手段均默认生效、可经环境变量开关。
+
+1. **持久 profile 建身份（降验证主手段）**：谷歌阶段设 `AUTOCLAW_GOOGLE_PERSIST_PROFILE=1` 时，复用固定 `data/google-profile`（累积 Google cookie / 浏览历史），告别「每次全新浏览器 + 共享 VPN 出口」被谷歌高敏识别的处境。
+   - 实现：`browserSession.launch(proxy, opts)` 支持 `opts.userDataDir`；`taskEngine` 推断平台，谷歌阶段且开关开启时两处 launch（首启 + 节点间 `_relaunch`）都传固定目录。百度阶段不受影响（平台隔离）。
+   - 持久 profile 跨节点串行复用，`close()` 已有强杀进程树兜底释放 profile 锁，无残留锁冲突风险。
+2. **软降权高标记共享节点**：谷歌节点池按延迟升序构建后，默认把命中 `/GPT/i` 的节点（如 `[HK]香港直连HK3 GPT` 这类热门共享出口，最易被谷歌标记）移到 pool 末尾，优先用低标记节点；成功数达标后高标记节点不会被使用，仅在低标记节点不足时兜底。
+   - 开关：`AUTOCLAW_GOOGLE_AVOID_HOT_NODES=0` 关闭；`AUTOCLAW_GOOGLE_AVOID_NODE_PATTERN` 覆盖匹配模式。
+
+### 环境变量新增
+- `AUTOCLAW_GOOGLE_PERSIST_PROFILE=1`：谷歌阶段复用固定 `data/google-profile`（建身份降验证码）。
+- `AUTOCLAW_GOOGLE_AVOID_HOT_NODES=0`：关闭谷歌高标记节点软降权。
+- `AUTOCLAW_GOOGLE_AVOID_NODE_PATTERN=<regex>`：自定义高标记节点匹配模式（默认 `/GPT/i`）。
+
+---
+
+## [0.3.39] — 2026-07-28
+
+### Fixed（谷歌高频触发机器人验证 / 验证码统计失真）
+
+**根因**：上一轮（v0.3.38）把节点失败率压下去了，但谷歌「异常流量」拦截页仍高频闪现——日志刷屏、且报告 `captchaWifi:0` 与日志对不上。审计发现两层问题：
+
+1. **统计漏记（且潜在串味）**：`captchaHit` 仅在「搜索/定位失败且错误文案命中验证码正则」时置位，而拦截页闪现后自动恢复（不抛错）的节点从未被记录 → 报告恒为 0；同时 `captchaHit` 只在引擎构造函数复位一次，一旦某轮置位会一直带到后续所有节点，存在把全任务节点都误记成 captcha 的隐患。
+2. **日志刷屏**：验证码轮询每 2s `console.warn` 一次（120s 上限 = 最多 60 条/节点），造成「高频触发」的观感放大。
+3. **反检测指纹不一致**：UA 池冻结在 2024 的 Chrome 124-127（与真机大版本不符），且**缺失 Accept-Language 请求头**（Chrome 默认发 `en-US`，与 zh-CN UA / `navigator.languages` 冲突）→ 区域不一致是谷歌识别自动化的强信号。
+
+**修复**：
+- **检测即上报、每轮复位**：`GoogleAdapter` 新增 `onCaptcha` 回调 + 每轮上报护栏；`taskEngine.runRound` 每轮复位 `captchaHit` 并重置护栏。拦截页出现（含自动恢复）即记入 `perWifi.captcha`，且不再跨节点串味。报告 `captchaWifi` 现能如实反映真实触发频次。
+- **日志降噪**：验证码提示改为「进入时提示一次 + 每 30s 提醒一次」，不再每 2s 刷屏（同轮至多 5 条而非 60 条）。
+- **反检测一致性**：
+  - 新增 `acceptLanguage: 'zh-CN,zh;q=0.9,en;q=0.8'` + `--lang=zh-CN`，与 UA / `navigator.languages` 三者对齐，消除区域不一致信号；
+  - UA 池刷新到 2026 真实大版本（Chrome 137-140），不再冻结 2024；
+  - `navigator.webdriver` 显式置 `false`（原 `undefined`）。
+- **收紧误判**：`_isCaptchaPage` 正文正则去掉裸词 `robot`（正常结果页 snippet 可能含 "robot" 造成误报），仅匹配谷歌拦截页特有短语（`unusual traffic` / `异常流量` / `please show you` / `confirm you are a human` / `our systems have detected` / `sorry/index`）+ `google.com/sorry` URL。
+
+### 后续建议（未在本版默认开启，需另行排期）
+- **持久 profile 建身份**：默认每任务临时 profile（无 cookie 历史），谷歌对「全新浏览器 + 共享 VPN 出口 IP」极其敏感。可加 `AUTOCLAW_GOOGLE_PERSIST_PROFILE` 复用固定 `data/google-profile` 累积 cookie/历史，显著降验证；需平台作用域隔离（避免百度阶段串用）。
+- **绕开最易被标记的共享节点**：`usedNode` 里 `[HK]香港直连HK3 GPT` 等「GPT」节点延迟最低，说明是热门共享出口，最易被谷歌标记；建议在 VPN 节点池中对谷歌降权/剔除「GPT」类共享节点。
+
 ## [0.3.38] — 2026-07-28
 
 ### Fixed（谷歌节点失败率高 — 节点内重试 + 降低单动作超时）

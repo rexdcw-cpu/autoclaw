@@ -25,17 +25,20 @@ const { ERR } = require('./progressEvent');
  * 拟真 UA 池（近期 Windows + 真实 Chrome 版本），每次启动随机取一个，
  * 避免所有任务固定同一个 UA 被关联。与下方 viewport 抖动共同降低指纹稳定性。
  */
+// 注意：UA 必须与本机真实 Chrome 大版本一致（不能冻结在 2024 的旧版本，
+// 否则 UA 声明版本与浏览器真实能力/TLS 不一致反而更易被识别为伪造）。
+// 2026 年中真实 Chrome 已到 13x 代，故池取 137-140。
 const REALISTIC_UA_POOL = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
 ];
 
 /** 反检测初始化脚本：抹除 navigator.webdriver 痕迹，并统一 navigator.languages（与 UA 一致） */
 const ANTI_DETECT_INIT_SCRIPT = function () {
   try {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
   } catch (e) {
     /* 某些上下文只读，忽略 */
   }
@@ -66,17 +69,19 @@ class BrowserSession {
    * @param {{httpProxy?:string}} [proxy] 代理注入入口（V1 不实现具体逻辑）
    * @returns {Promise<import('playwright').BrowserContext>}
    */
-  async launch(proxy) {
-    // 持久化 profile：读取 env AUTOCLAW_CHROME_USER_DATA，默认 <项目根>/data/chrome-profile。
-    // 持久化可保留登录态 / cookie / 历史，运营方可先手动在可见窗口登录一次百度，
-    // 已登录态极少触发验证码（这是绕过百度风控的主要手段）。
-    // 默认每次启动用独立临时目录，避免异常退出/多任务导致的 profile 锁竞争；
-    // 仅当显式设置 AUTOCLAW_CHROME_USER_DATA 时才复用固定目录（手动登录百度降验证码场景，需单任务串行）。
-    const userDataDir =
+  async launch(proxy, opts) {
+    // 持久化 profile 优先级：
+    //   1) 显式传入 opts.userDataDir（如谷歌阶段复用 data/google-profile 建身份，降验证码）
+    //   2) env AUTOCLAW_CHROME_USER_DATA（手动登录百度降验证码场景）
+    //   3) 默认每次独立临时目录（避免 profile 锁竞争）
+    const overrideUd =
+      (opts && typeof opts.userDataDir === 'string' && opts.userDataDir) ||
       process.env.AUTOCLAW_CHROME_USER_DATA ||
-      fs.mkdtempSync(path.join(os.tmpdir(), 'autoclaw-chrome-'));
+      '';
+    const userDataDir =
+      overrideUd || fs.mkdtempSync(path.join(os.tmpdir(), 'autoclaw-chrome-'));
     this._userDataDir = userDataDir;
-    this._isTempProfile = !process.env.AUTOCLAW_CHROME_USER_DATA;
+    this._isTempProfile = !overrideUd;
     fs.mkdirSync(userDataDir, { recursive: true });
 
     // 持久化上下文选项：可见窗口 + 拟真 UA / 视口（这些原本在 newContext 中设置，
@@ -94,11 +99,21 @@ class BrowserSession {
     const contextOptions = {
       headless: false, // T-D5：开本机真实可见窗口（路线 A：Windows 原生 Chrome）
       // 降 bot 识别：去掉 AutomationControlled blink 特性，抹除 navigator.webdriver 痕迹
-      args: ['--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+      args: [
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        // 与 UA / navigator.languages 保持一致的区域语言，避免「中文 Windows UA + 英文 Accept-Language」
+        // 的区域不一致指纹（谷歌据此高度怀疑自动化）。--lang 设置浏览器 UI 语言，
+        // acceptLanguage 设置请求头，二者同时对齐 zh-CN。
+        '--lang=zh-CN',
+      ],
       // 移除 Playwright 自动化开关（谷歌等据此高度关联 bot）
       ignoreDefaultArgs: ['--enable-automation'],
       // 拟真 UA，降低无头浏览器被识别概率
       userAgent: userAgent,
+      // 请求头 Accept-Language：与 UA / navigator.languages 一致（zh-CN 优先），
+      // 填补此前缺失导致的「区域不一致」bot 信号。
+      acceptLanguage: 'zh-CN,zh;q=0.9,en;q=0.8',
       viewport: viewport,
     };
 

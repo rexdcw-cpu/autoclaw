@@ -114,7 +114,10 @@ function summarize(run) {
   const skipped = run.perWifi.filter((w) => w.status === 'skipped').length;
   const totalAttempts = run.perWifi.reduce((s, w) => s + (w.attempts || 0), 0);
   const totalRetries = run.perWifi.reduce((s, w) => s + (w.retriesUsed || 0), 0);
-  const nodeDurations = run.perWifi.map((w) => (w.durationMs != null ? w.durationMs : 0));
+  // 仅纳入有真实耗时的节点（skipped / 未记录耗时的 durationMs 为 null，不计入平均，避免被当 0 拉低均值）
+  const nodeDurations = run.perWifi
+    .filter((w) => w.durationMs != null)
+    .map((w) => w.durationMs);
   const sumNodeDur = nodeDurations.reduce((s, d) => s + d, 0);
   const avgNodeDur = nodeDurations.length ? Math.round(sumNodeDur / nodeDurations.length) : 0;
   const foundCount = run.perWifi.filter((w) => w.found === true).length;
@@ -133,7 +136,13 @@ function summarize(run) {
     totalRetries: totalRetries,
     totalDurationMs: (run.durationMs != null ? run.durationMs : null),
     avgNodeDurationMs: avgNodeDur,
-    overall: failed === 0 && skipped === 0 ? 'completed' : (failed > 0 ? 'failed' : 'partial'),
+    // 整体结论改为「完成率驱动」：全部完成且无跳过 → completed；
+    // 否则按完成率分档——>=70%（与既有 30% 熔断阈值对齐）视为 partial，避免低失败率
+    // （如 1/15≈93%）被旧逻辑「有 failed 即 failed」误判为 failed 而触发熔断；极低完成率 → failed。
+    // 修复补跑 / 重试达标场景下整体结论失真的问题。
+    overall: (completed === total && skipped === 0)
+      ? 'completed'
+      : (total > 0 && completed / total >= 0.7 ? 'partial' : 'failed'),
     vpn: run.vpn || null,
   };
   return run.summary;
@@ -193,11 +202,23 @@ function renderMarkdown(run) {
     } else {
       lines.push('- 状态：已开启并走 VPN 出口');
       lines.push('- 主节点可用：' + (v.availableCount != null ? v.availableCount : '?') + ' / ' + (v.total != null ? v.total : '?'));
-      lines.push('- 选用节点：' + (v.usedNode || (v.current || '未知')) +
-        (v.usedCount != null && v.targetCount != null
-          ? '（成功 ' + v.usedCount + ' / 目标 ' + v.targetCount + ' 个' +
-            (v.usedCount < v.targetCount ? '，部分节点失败已自动换备选补跑' : '') + '）'
-          : ''));
+      let nodeLabel;
+      let triedCount = null;
+      if (Array.isArray(v.usedNodes) && v.usedNodes.length) {
+        triedCount = v.usedNodes.length;
+        nodeLabel = v.usedNodes.length <= 10
+          ? v.usedNodes.join('、')
+          : v.usedNodes.slice(0, 8).join('、') + ' …等共 ' + v.usedNodes.length + ' 个';
+      } else {
+        nodeLabel = (v.usedNode || (v.current || '未知'));
+      }
+      let nodeSuffix = '';
+      if (v.usedCount != null && v.targetCount != null) {
+        nodeSuffix = '（' + (triedCount != null ? '共尝试 ' + triedCount + ' 个，' : '') +
+          '成功 ' + v.usedCount + ' / 目标 ' + v.targetCount + ' 个' +
+          (v.usedCount < v.targetCount ? '，部分节点失败已自动换备选补跑' : '') + '）';
+      }
+      lines.push('- 选用节点：' + nodeLabel + nodeSuffix);
       lines.push('- 代理地址：' + (v.proxyUrl || '（未记录）'));
     }
     lines.push('');
