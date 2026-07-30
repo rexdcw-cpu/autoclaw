@@ -4,6 +4,18 @@
 
 ---
 
+## [0.3.43] — 2026-07-30
+
+### Changed（浏览器无头模式可配置，支持服务器部署）
+
+**目标**：原 `browserSession.js` 将 `headless` 硬编码为 `false`（本机 Windows 可见窗口调试用），导致部署到无桌面服务器时 Chrome 启动失败（Playwright 报 "launched a headed browser without XServer"）。
+
+- `core/browserSession.js` 的 `headless` 改为读环境变量 `AUTOCLAW_HEADLESS`（`'1'`/`'true'` 为真），**默认仍为 `false`**，本机调试行为不变。
+- 无头模式下自动追加 `--no-sandbox`、`--disable-setuid-sandbox`、`--disable-gpu`，兼容 Linux 服务器 / 容器 root 环境（否则 Chrome 拒绝启动）。
+- **部署须知**：服务器无桌面须设 `AUTOCLAW_HEADLESS=1`；若服务器无系统 Chrome，需通过 `AUTOCLAW_CHROME_PATH` 指向 Playwright 安装的 Chromium，或先 `npx playwright install chromium`。
+
+---
+
 ## [0.3.42] — 2026-07-29
 
 ### Fixed（谷歌持久 profile 形同虚设的真 bug）

@@ -97,7 +97,9 @@ class BrowserSession {
       height: 800 + Math.floor(Math.random() * 160), // 800-960
     };
     const contextOptions = {
-      headless: false, // T-D5：开本机真实可见窗口（路线 A：Windows 原生 Chrome）
+      // T-D5：默认开本机真实可见窗口（路线 A：Windows 原生 Chrome）。
+      // 服务器无桌面环境需设 AUTOCLAW_HEADLESS=1 切无头模式，否则 Chrome 启动失败。
+      headless: process.env.AUTOCLAW_HEADLESS === '1' || process.env.AUTOCLAW_HEADLESS === 'true',
       // 降 bot 识别：去掉 AutomationControlled blink 特性，抹除 navigator.webdriver 痕迹
       args: [
         '--disable-dev-shm-usage',
@@ -116,6 +118,10 @@ class BrowserSession {
       acceptLanguage: 'zh-CN,zh;q=0.9,en;q=0.8',
       viewport: viewport,
     };
+    // 服务器无桌面 / root 容器必须以无头 + 关闭沙箱方式启动，否则 Chrome 启动失败
+    if (contextOptions.headless) {
+      contextOptions.args.push('--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu');
+    }
 
     // 本机 Chrome：优先用 AUTOCLAW_CHROME_PATH 指定路径，否则自动探测 channel:'chrome'
     const chromePath = process.env.AUTOCLAW_CHROME_PATH || '';
