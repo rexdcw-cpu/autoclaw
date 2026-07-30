@@ -79,6 +79,11 @@ autoclaw/
 
 ---
 
+## 快速上手（Agent / 新人一键安装测试）
+
+- **`AGENT-SETUP.md`** — 跨平台使用手册：环境要求、一键安装+测试（`scripts/bootstrap.js`）、配置、启动、开发踩坑清单、排错 FAQ。
+- **`node scripts/bootstrap.js`** — 自动检测 OS → `npm install` → 跑全量单元测试（无需浏览器/数据库）；加 `--with-browser` 可顺带装 Chromium（无头服务器用）。
+
 ## 本地 / WSL 安装与运行
 
 ```bash
