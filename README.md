@@ -193,6 +193,41 @@ node app.js
 
 ---
 
+## 批量定时任务（campaign）
+
+把多个网站编成一个「批量任务」，**按每日固定时间或每隔 N 小时**自动依次跑完，可选项**每轮打乱站点顺序**。受「单活跃任务」限制，每轮各站**串行**执行，全部跑完才排下一轮——天然实现「每轮所有网站都执行到、顺序随机」。
+
+- **数据模型**：一个 campaign = 一组 `targets` + 调度 + 打乱开关。每个 `target` 是一个网站，字段与单流程配置页一致：`name`、`domain`、`enabled`（是否参与本轮，默认勾选）、`platforms`（可单独只跑百度 / 只跑谷歌 / 百度+谷歌）、`keywords`、`titleKeywords`、`browseAnchor`（浏览锚点）、`pollWifi`、`maxResultPages`（扫描页数）、拟人参数等；每站字段缺省回落 campaign 级默认。每个 target 运行时被提交为一次普通 task（复用现有引擎 / 历史 / 统计），故每个站都有独立任务记录可回看。
+- **站点增删改查**：管理页（`/campaigns.html`）站点是动态列表——可新增、删除、编辑每站；每行带「是否参与本轮」勾选框（默认勾），取消勾选则该站本轮不跑但仍保留配置。
+- **每站独立流程**：某站可单独配「只跑百度」、某站「只跑谷歌」，其余走 campaign 默认；完全镜像单流程配置页的字段能力。
+- **调度类型**：`daily`（每天本地时间 `scheduleHour:scheduleMinute` 触发）或 `interval`（每 `intervalHours` 小时触发）。
+- **容错**：单个站点任务成功或失败都算「已处理」，失败不阻塞整轮（失败站点留待下一轮重试）；用户手动暂停 / 停止会终止当前轮，剩余站点下一轮再跑。进度条按**本轮启用站数**计。
+- **重启安全**：进程启动时清理任何残留运行态（上次死于运行中），避免僵尸态。
+
+### 操作方式
+
+1. **管理页面**（推荐）：打开 `/campaigns.html` → 填名称 / 调度 / 平台 / 站点目标 → 保存；列表里可启用、立即触发、编辑、删除，并有实时进度条。点「一键预填公司 10 站」可快速载入内置的 10 个公司站点默认（域名 + 品牌词）。
+2. **种子脚本**（一键建公司全站每日任务）：
+
+   ```bash
+   AUTOCLAW_DB_TYPE=sqlite node scripts/seed-company-campaign.js
+   ```
+
+   默认建一个名为「公司全站每日巡检」的 daily 09:00 任务，10 站、打乱、百度+谷歌。已存在同名则更新。
+3. **REST API**（继承 A3 鉴权，`x-autoclaw-token`）：
+
+   | 方法 | 路径 | 说明 |
+   |------|------|------|
+   | GET  | `/api/campaign/list` | 列出全部 + 当前运行状态 |
+   | POST | `/api/campaign/create` | 新建 `{ name, scheduleType, scheduleHour?, scheduleMinute?, intervalHours?, platforms, shuffle, pollWifi, targets:[{name,domain,titleKeywords,keywords}] }` |
+   | POST | `/api/campaign/update` | 更新（同字段，最小集亦可，`{ id, ... }`） |
+   | POST | `/api/campaign/delete` | 删除 `{ id }` |
+   | POST | `/api/campaign/enable` | 启用/停用 `{ id, enabled }` |
+   | POST | `/api/campaign/trigger` | 立即跑一轮 `{ id }`（绕过排程，便于首验） |
+   | GET  | `/api/campaign/state`  | 当前运行状态快照 |
+
+---
+
 ## API 速览
 
 | 方法 | 路径 | 说明 |
@@ -205,6 +240,9 @@ node app.js
 | GET  | `/api/task/history` | 历史配置列表（created_at DESC，F-24） |
 | GET  | `/api/task/logs?taskId=` | 运行记录时间线 + 成功率/失败率（F-25） |
 | GET  | `/api/status` | 健康检查（不鉴权） |
+| GET  | `/api/campaign/list` | 批量任务列表 + 运行状态（见上节） |
+| POST | `/api/campaign/{create,update,delete,enable,trigger}` | 批量任务增删改 / 触发 |
+| GET  | `/api/campaign/state` | 批量任务当前运行快照 |
 
 ---
 

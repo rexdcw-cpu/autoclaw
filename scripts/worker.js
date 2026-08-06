@@ -60,6 +60,8 @@ function sleep(ms) {
 
 /** 失败重试前的短暂停顿（毫秒）；可通过 AUTOCLAW_WIFI_RETRY_GAP_MS 覆盖 */
 const RETRY_GAP_MS = parseInt(process.env.AUTOCLAW_WIFI_RETRY_GAP_MS, 10) || 2000;
+/** WiFi 切换失败后的应用层重试次数（缓解偶发竞争/瞬时失败，如紧挨切网时 WlanConnect 竞争）；可用 AUTOCLAW_WIFI_SWITCH_RETRY 覆盖 */
+const WIFI_SWITCH_MAX_RETRY = parseInt(process.env.AUTOCLAW_WIFI_SWITCH_RETRY, 10) || 3;
 
 /** 终态优先级：FAILED > STOPPED/PAUSED > COMPLETED */
 function worstStatus(a, b) {
@@ -109,8 +111,44 @@ async function buildWifiSeq(config, wm) {
   }
   const visible = await wm.listNetworks();
   const visibleSet = new Set(visible.map((n) => n.ssid));
+  // 隐藏网络不广播 SSID，扫描里永远看不到；但只要本机存有其凭证（Windows profile）
+  // 且该 profile 标了 nonBroadcast，connectSaved 就能凭 profile 名直连。
+  //
+  // 判据优先级：
+  //   1) Windows profile 的 nonBroadcast 标记（权威）——面板「本机已存 WiFi」可一键
+  //      标记，隐藏网连接成功时也会自动带上。系统层面已声明「即使不广播也连接」，
+  //      说明用户确认这是隐藏网络，扫不到属正常，必须纳入轮询。
+  //   2) config.hiddenWifis 前端白名单（补充/兼容，且要求本机确有 profile）。
+  //
+  // ⚠️ 仍不能一律放行「所有已存 profile」：本机常残留换地点后再也扫不到的旧网络，
+  // 全放行会让每轮挨个尝试并失败（每个 10s+ 且刷屏日志），拖慢任务像卡死。
+  // 未标隐藏的普通网络仍严格按可见性过滤。
+  const hiddenWhitelist = new Set(
+    Array.isArray(config.hiddenWifis) ? config.hiddenWifis.filter(Boolean) : [],
+  );
+  const hiddenProfileSet = new Set();
+  if (typeof wm.listSavedProfilesDetailed === 'function') {
+    try {
+      const detailed = await wm.listSavedProfilesDetailed();
+      (detailed || []).forEach((p) => {
+        if (p && p.hidden && p.ssid) hiddenProfileSet.add(p.ssid);
+      });
+    } catch (e) {
+      /* 读取失败则退回仅用前端白名单 */
+    }
+  }
+  let savedSet = null;
+  if (hiddenWhitelist.size && typeof wm.listSavedProfiles === 'function') {
+    try {
+      savedSet = await wm.listSavedProfiles();
+    } catch (e) {
+      savedSet = new Set();
+    }
+  }
+  const isHiddenConnectable = (s) =>
+    hiddenProfileSet.has(s) || (hiddenWhitelist.has(s) && (!savedSet || savedSet.has(s)));
   const beforeLen = source.length;
-  let pool = source.filter((s) => visibleSet.has(s));
+  let pool = source.filter((s) => visibleSet.has(s) || isHiddenConnectable(s));
   const excludedNotVisible = beforeLen - pool.length;
   if (pool.length === 0) pool = source.slice();
 
@@ -405,7 +443,7 @@ async function runPhased(config, emit, deps) {
             wifiTotal: targetCount,
           }));
           gT0 = Date.now();
-          const stRun = await eng.run(googleRounds, { vpnPreset: preset });
+          const stRun = await eng.run(googleRounds, { vpnPreset: preset, disableCircuitBreak: true });
           gT1 = Date.now();
           st = stRun;
           nodeErr = (eng && eng.lastErrorDetail) ? eng.lastErrorDetail : String(stRun);
@@ -503,7 +541,21 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
     if (abort) { finalStatus = abortStatus; break; }
     if (i > 0 || (i === 0 && ssid && (await wm.getCurrentSsid()) !== ssid)) {
       if (ssid) {
-        const cr = await wm.connectSaved(ssid);
+        // 切换 WiFi 带重试：缓解偶发竞争 / 瞬时失败（如 ROSNET19 曾因紧挨上一网切换竞争被直接 skipped）。
+        // v0.3.55 的 wlanconnect.ps1 已在 WlanConnect 前断开当前连接，这里再加应用层重试兜底。
+        let cr = null;
+        for (let sw = 1; sw <= WIFI_SWITCH_MAX_RETRY; sw += 1) {
+          cr = await wm.connectSaved(ssid);
+          if (cr && cr.ok) break;
+          if (sw < WIFI_SWITCH_MAX_RETRY) {
+            emit(P.makeProgress({
+              taskId: config.taskId, type: EventType.WIFI_POLL,
+              message: '切换『' + ssid + '』第 ' + sw + ' 次失败（' + (cr ? cr.message : '无返回') + '），' + RETRY_GAP_MS + 'ms 后重试',
+              wifiIndex: i + 1, wifiTotal: seq.length, ssid: ssid,
+            }));
+            await retryWait(RETRY_GAP_MS);
+          }
+        }
         emit(P.makeProgress({
           taskId: config.taskId,
           type: EventType.WIFI_POLL,
@@ -544,7 +596,7 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
       attempts += 1;
       const eng = makeEngine(config, emit);
       engine = eng;
-      const st = await eng.run(baiduRounds);
+      const st = await eng.run(baiduRounds, { disableCircuitBreak: true });
       if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) {
         terminal = st; controlBreak = true; break;
       }
@@ -646,7 +698,20 @@ async function runLegacy(config, emit, deps) {
     if (i > 0 || (i === 0 && ssid && (await wm.getCurrentSsid()) !== ssid)) {
       if (abort) { finalStatus = abortStatus; break; }
       if (ssid) {
-        const cr = await wm.connectSaved(ssid);
+        // 切换 WiFi 带重试：缓解偶发竞争 / 瞬时失败。v0.3.55 的 wlanconnect.ps1 已断开前置，这里再加应用层重试兜底。
+        let cr = null;
+        for (let sw = 1; sw <= WIFI_SWITCH_MAX_RETRY; sw += 1) {
+          cr = await wm.connectSaved(ssid);
+          if (cr && cr.ok) break;
+          if (sw < WIFI_SWITCH_MAX_RETRY) {
+            emit(P.makeProgress({
+              taskId: config.taskId, type: EventType.WIFI_POLL,
+              message: '切换『' + ssid + '』第 ' + sw + ' 次失败（' + (cr ? cr.message : '无返回') + '），' + RETRY_GAP_MS + 'ms 后重试',
+              wifiIndex: i + 1, wifiTotal: order.length, ssid: ssid,
+            }));
+            await retryWait(RETRY_GAP_MS);
+          }
+        }
         emit(P.makeProgress({
           taskId: config.taskId,
           type: EventType.WIFI_POLL,

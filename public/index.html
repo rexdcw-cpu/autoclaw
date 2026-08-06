@@ -10,8 +10,13 @@
     <main class="container">
       <header class="page-head">
         <h1>autoclaw · SEO 自动化控制台</h1>
-        <p class="subtitle">配置搜索平台、关键词与目标站点，启动拟人化点击任务</p>
+        <nav class="nav-links">
+          <a class="link-home" href="/history.html">任务历史</a>
+          <a class="link-home" href="/progress.html">任务进度</a>
+          <a class="link-home" href="/campaigns.html">批量任务</a>
+        </nav>
       </header>
+      <p class="subtitle">配置搜索平台、关键词与目标站点，启动拟人化点击任务</p>
 
       <form id="task-form" class="card" novalidate>
         <!-- 平台 -->
@@ -220,6 +225,53 @@
         <p class="hint">加载中…</p>
       </div>
       <p id="wifi-msg" class="error-text" hidden></p>
+
+      <!-- 添加隐藏 WiFi（不广播 SSID 的网络不会出现在上方列表） -->
+      <div class="wifi-hidden-add">
+        <h3>添加隐藏 WiFi</h3>
+        <p class="hint">不广播 SSID 的网络不会出现在上方列表。直接填名称+密码，点「添加并连接」测试能否连上；连成功后自动保存本机配置并记住密码（可用于 WIFI 轮询）。</p>
+        <div class="row">
+          <div class="col">
+            <label for="hidden-ssid">WiFi 名称 (SSID)</label>
+            <input type="text" id="hidden-ssid" placeholder="区分大小写，如 MyHiddenNet" autocomplete="off" />
+          </div>
+          <div class="col">
+            <label for="hidden-pw">密码</label>
+            <input type="password" id="hidden-pw" placeholder="WiFi 密码" autocomplete="off" />
+          </div>
+          <div class="col" style="flex: 0 0 auto; align-self: flex-end">
+            <button type="button" id="hidden-add-btn">添加并连接</button>
+          </div>
+        </div>
+        <p id="hidden-msg" class="error-text" hidden></p>
+        <div id="hidden-remembered" class="wifi-remembered"></div>
+      </div>
+
+      <!-- 本机已存 WiFi：批量标记隐藏网络并纳入轮询 -->
+      <div class="wifi-saved-block">
+        <h3>本机已存 WiFi（隐藏网络修复）</h3>
+        <p class="hint">
+          隐藏网络必须在系统配置文件里标记「即使不广播也连接」，否则 Windows 不会主动探测它，
+          切换时一律失败（日志里表现为「信号弱或凭证失效」）。勾选下方隐藏网络后点「标记为隐藏并纳入轮询」，
+          即可一键修好并加入 WIFI 轮询序列 —— <strong>原密码与加密方式原样保留，无需重新输入</strong>。
+        </p>
+        <div class="row">
+          <div class="col" style="flex: 0 0 auto">
+            <button type="button" id="saved-refresh">扫描本机已存 WiFi</button>
+          </div>
+          <div class="col" style="flex: 0 0 auto; align-self: flex-end">
+            <button type="button" id="saved-mark-btn">标记为隐藏并纳入轮询</button>
+          </div>
+          <div class="col" style="flex: 0 0 auto; align-self: flex-end">
+            <button type="button" id="saved-select-all" class="link-btn small">全选</button>
+            <button type="button" id="saved-select-none" class="link-btn small faint">全不选</button>
+          </div>
+        </div>
+        <div id="saved-list" class="saved-list">
+          <p class="hint">点「扫描本机已存 WiFi」查看本机保存的全部网络及其隐藏标记状态。</p>
+        </div>
+        <p id="saved-msg" class="error-text" hidden></p>
+      </div>
     </section>
   </main>
 

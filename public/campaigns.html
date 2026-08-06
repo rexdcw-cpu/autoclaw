@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>autoclaw · 批量定时任务</title>
+    <link rel="stylesheet" href="/css/style.css" />
+    <style>
+      .site-card {
+        border: 1px solid #d8dee6;
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin-bottom: 14px;
+        background: #fbfcfe;
+      }
+      .site-card.disabled-site { opacity: 0.55; background: #f2f3f5; }
+      .site-head {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+      .site-head .si-name { flex: 1; font-weight: 600; }
+      .site-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 10px 16px;
+      }
+      .site-grid .col { display: flex; flex-direction: column; gap: 4px; }
+      .site-grid label { font-size: 12px; color: #5b6573; }
+      .site-grid input[type="text"],
+      .site-grid input[type="number"],
+      .site-grid textarea {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px 8px;
+        border: 1px solid #cfd6df;
+        border-radius: 6px;
+        font-size: 13px;
+      }
+      .site-grid textarea { min-height: 52px; resize: vertical; }
+      .site-platforms { display: flex; gap: 14px; align-items: center; padding-top: 4px; }
+      .site-actions { margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap; }
+      .btn-danger { background: #e5534b; color: #fff; border: none; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+      .btn-danger:hover { background: #cf3f37; }
+      details.adv { margin-top: 10px; border-top: 1px dashed #d8dee6; padding-top: 8px; }
+      details.adv summary { cursor: pointer; font-size: 13px; color: #3b6ea5; }
+      .sites-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+      .sites-count { font-size: 13px; color: #5b6573; }
+    </style>
+  </head>
+  <body>
+    <main class="container">
+      <header class="page-head">
+        <h1>autoclaw · 批量定时任务</h1>
+        <nav class="nav-links">
+          <a class="link-home" href="/">任务配置</a>
+          <a class="link-home" href="/progress.html">任务进度</a>
+          <a class="link-home" href="/history.html">任务历史</a>
+        </nav>
+      </header>
+      <p class="subtitle">
+        把多个网站编成一个「批量任务」，按每日/间隔定时自动依次跑完（可选打乱顺序）。
+        每个站点可单独配置：是否参与本轮、跑百度还是谷歌、关键词与站内锚点、WIFI 轮询等。
+        受单活跃任务限制，每轮各站串行执行、全部跑完才排下一轮；每站执行都会在「任务历史」留下记录。
+      </p>
+
+      <!-- 当前运行态 -->
+      <section class="card" id="live-card">
+        <h2>当前运行</h2>
+        <div id="live-empty" class="hint">当前没有批量任务在运行。</div>
+        <div id="live-body" hidden>
+          <div><strong id="live-name"></strong> <span id="live-progress" class="badge"></span></div>
+          <div class="progress-bar"><div id="live-bar" class="progress-fill"></div></div>
+          <div id="live-current" class="hint"></div>
+        </div>
+      </section>
+
+      <!-- 新建 / 编辑表单 -->
+      <section class="card">
+        <h2 id="form-title">新建批量任务</h2>
+        <form id="campaign-form" novalidate>
+          <input type="hidden" id="campaign-id" />
+          <div class="field">
+            <label for="name">任务名称</label>
+            <input type="text" id="name" placeholder="公司全站每日巡检" value="公司全站每日巡检" />
+          </div>
+
+          <div class="field">
+            <label for="scheduleType">调度方式</label>
+            <select id="scheduleType">
+              <option value="daily">每天固定时间</option>
+              <option value="interval">每隔 N 小时</option>
+            </select>
+          </div>
+
+          <div class="field" id="daily-fields">
+            <label>每天触发时间（服务器本地时间）</label>
+            <div class="row">
+              <input type="number" id="scheduleHour" min="0" max="23" value="9" style="width:80px" /> 时
+              <input type="number" id="scheduleMinute" min="0" max="59" value="0" style="width:80px" /> 分
+            </div>
+          </div>
+
+          <div class="field" id="interval-fields" hidden>
+            <label for="intervalHours">间隔小时数</label>
+            <input type="number" id="intervalHours" min="1" max="744" value="24" style="width:120px" /> 小时
+          </div>
+
+          <fieldset class="field">
+            <legend>全站默认平台（新建站点自动带入，可逐站覆盖）</legend>
+            <label class="check"><input type="checkbox" name="c-platforms" value="baidu" checked /> 百度</label>
+            <label class="check"><input type="checkbox" name="c-platforms" value="google" checked /> 谷歌（需 VPN 出口）</label>
+          </fieldset>
+
+          <fieldset class="field">
+            <legend>选项</legend>
+            <label class="check"><input type="checkbox" id="shuffle" checked /> 每轮打乱站点顺序</label>
+            <label class="check"><input type="checkbox" id="pollWifi" /> 全站默认启用 WIFI 轮询（可逐站覆盖）</label>
+          </fieldset>
+
+          <!-- 站点目标：可视化增删改 -->
+          <div class="field">
+            <div class="sites-toolbar">
+              <span class="sites-count" id="sites-count">站点目标：0 个</span>
+              <button type="button" id="add-site" class="btn-small">+ 添加站点</button>
+              <button type="button" id="prefill" class="btn-small">一键预填公司 10 站</button>
+              <button type="button" id="apply-defaults" class="btn-small">应用全站默认到所有站点</button>
+            </div>
+            <div id="sites"></div>
+            <small class="hint">
+              每行即一个站点：勾选「参与本轮」才会被本批次跑（默认勾选，取消即跳过该站）。
+              「平台」可单独设：仅百度 / 仅谷歌 / 百度+谷歌。关键词与单流程配置页一致。
+            </small>
+          </div>
+
+          <div class="row" style="gap:12px">
+            <button type="submit" id="save-btn" class="btn-primary">保存</button>
+            <button type="button" id="cancel-edit" class="btn-small" hidden>取消编辑</button>
+          </div>
+          <div id="form-msg" class="hint"></div>
+        </form>
+      </section>
+
+      <!-- 列表 -->
+      <section class="card">
+        <h2>已有批量任务</h2>
+        <div id="list-empty" class="hint">还没有批量任务，先在上方新建一个。</div>
+        <div id="campaign-list"></div>
+      </section>
+    </main>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/js/campaigns.js"></script>
+  </body>
+</html>

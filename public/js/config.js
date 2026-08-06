@@ -21,6 +21,17 @@
   var savedToken = localStorage.getItem(TOKEN_KEY);
   if (savedToken) tokenInput.value = savedToken;
 
+  // 统一令牌读取（与 wifi.js 同语义：localStorage 优先，缺省 autoclaw-dev）。
+  // 注：submitTask 内的局部 token 仅用于提交；loadHistory/tokenHeaders 等
+  // 顶层调用点必须走本函数，否则会引用到未初始化的外层 token 变量而 401。
+  function getToken() {
+    try {
+      return localStorage.getItem(TOKEN_KEY) || 'autoclaw-dev';
+    } catch (e) {
+      return 'autoclaw-dev';
+    }
+  }
+
   function showError(msg) {
     errorEl.textContent = msg;
     errorEl.hidden = false;
@@ -39,6 +50,17 @@
       var raw = localStorage.getItem('autoclaw_wifi_pw_v1');
       var obj = raw ? JSON.parse(raw) : {};
       return Object.keys(obj || {}).filter(function (s) { return !!s; });
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // 隐藏 WiFi 白名单（由 WiFi 面板「添加隐藏 WiFi」写入），与 wifi.js 同源存储键
+  function getHiddenWifis() {
+    try {
+      var raw = localStorage.getItem('autoclaw_wifi_hidden_v1');
+      var arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.filter(function (s) { return !!s; }) : [];
     } catch (e) {
       return [];
     }
@@ -157,6 +179,9 @@
       // 仅轮询面板「已存」的 WIFI（localStorage 记住密码的 SSID），与 Windows 全部历史已保存配置文件解耦
       var remembered = getRememberedWifis();
       if (remembered.length) payload.rememberedWifis = remembered;
+      // 隐藏网络白名单：这些 SSID 不广播、扫描不可见，轮询时需豁免可见性检查
+      var hiddenWifis = getHiddenWifis();
+      if (hiddenWifis.length) payload.hiddenWifis = hiddenWifis;
     }
 
     var btn = document.getElementById('submit-btn');
@@ -203,7 +228,7 @@
   var historyCache = {};
 
   function loadHistory() {
-    fetch('/api/task/history?limit=50', { headers: { 'x-autoclaw-token': token } })
+    fetch('/api/task/history?limit=50', { headers: { 'x-autoclaw-token': getToken() } })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (!d || d.code !== 0 || !d.data || !d.data.list) return;
@@ -280,7 +305,8 @@
 
   function tokenHeaders(extra) {
     var h = { 'Content-Type': 'application/json' };
-    if (token) h['x-autoclaw-token'] = token;
+    var t = getToken();
+    if (t) h['x-autoclaw-token'] = t;
     return Object.assign(h, extra || {});
   }
 

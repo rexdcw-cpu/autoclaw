@@ -66,3 +66,29 @@ CREATE TABLE IF NOT EXISTS client (
 
 -- task_config 增加客户外键列（迁移用；新库建表时可直接并入建表语句）
 ALTER TABLE task_config ADD COLUMN client_id VARCHAR(36) NULL DEFAULT NULL COMMENT 'FK -> client.client_id（V2 客户线）';
+
+-- 批量定时任务（campaign）：一组网站目标 + 调度 + 打乱开关。
+-- 时间字段以 epoch 毫秒（BIGINT）存储，便于调度器直接比较、规避时区问题。
+CREATE TABLE IF NOT EXISTS campaigns (
+  id                VARCHAR(36)   NOT NULL,
+  name              VARCHAR(255)  NOT NULL,
+  schedule_type     VARCHAR(16)   NOT NULL DEFAULT 'daily' COMMENT 'daily | interval',
+  schedule_hour     INT           NULL DEFAULT NULL,
+  schedule_minute   INT           NULL DEFAULT NULL,
+  interval_hours    INT           NULL DEFAULT NULL,
+  enabled           TINYINT       NOT NULL DEFAULT 1,
+  shuffle           TINYINT       NOT NULL DEFAULT 1,
+  platforms         JSON          NOT NULL COMMENT '["baidu","google"]',
+  poll_wifi         TINYINT       NOT NULL DEFAULT 0,
+  remembered_wifis  JSON          NULL DEFAULT NULL COMMENT '面板「已存」SSID 数组',
+  targets           JSON          NOT NULL COMMENT '[{name,domain,titleKeywords,keywords,clientId?}]',
+  run_state         JSON          NULL DEFAULT NULL COMMENT '运行态快照',
+  last_run_at       BIGINT        NULL DEFAULT NULL COMMENT 'epoch ms',
+  last_run_status   VARCHAR(16)   NULL DEFAULT NULL COMMENT 'done | partial | aborted | error',
+  next_run_at       BIGINT        NULL DEFAULT NULL COMMENT 'epoch ms',
+  created_at        DATETIME      NOT NULL,
+  updated_at        DATETIME      NULL DEFAULT NULL,
+  PRIMARY KEY (id),
+  KEY idx_campaigns_next (next_run_at),
+  KEY idx_campaigns_enabled (enabled)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

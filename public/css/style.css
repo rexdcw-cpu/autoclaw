@@ -206,6 +206,134 @@ button.danger {
   margin: 10px 0 0;
 }
 
+.error-text.ok {
+  color: #1a7f37;
+}
+
+/* 添加隐藏 WiFi 区块 */
+.wifi-hidden-add,
+.wifi-saved-block {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px dashed var(--border, #ddd);
+}
+
+.wifi-hidden-add h3,
+.wifi-saved-block h3 {
+  font-size: 15px;
+  margin: 0 0 6px;
+}
+
+/* 本机已存 WiFi 列表（批量标记隐藏） */
+.saved-list {
+  margin-top: 12px;
+}
+
+.saved-items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.saved-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.saved-item:hover {
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.saved-item input[type='checkbox'] {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.saved-item .chip-tag {
+  border-radius: 8px;
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #fff;
+  flex: 0 0 auto;
+}
+
+.saved-item .tag-visible {
+  background: #1a7f37;
+}
+
+.saved-item .tag-invisible {
+  background: #9a6700;
+}
+
+.saved-item .tag-hidden {
+  background: #4b5563;
+}
+
+.saved-item .tag-poll {
+  background: #0969da;
+}
+
+.saved-item .faint {
+  color: var(--muted, #888);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.wifi-remembered {
+  margin-top: 12px;
+}
+
+.remembered-title {
+  font-size: 12px;
+  color: var(--muted, #888);
+  margin-bottom: 6px;
+}
+
+.remembered-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.remembered-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #1a7f37;
+  color: #fff;
+  border-radius: 14px;
+  padding: 3px 6px 3px 12px;
+  font-size: 13px;
+}
+
+.remembered-chip .chip-tag {
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.remembered-chip .link-btn {
+  color: #fff;
+  opacity: 0.8;
+}
+
+.remembered-chip .link-btn:hover {
+  opacity: 1;
+}
+
 /* 进度页头部状态 */
 .header-card {
   display: flex;
@@ -548,4 +676,31 @@ button.danger {
 .client-form label {
   font-size: 13px;
   color: var(--muted);
+}
+
+/* 任务历史页 */
+.nav-links {
+  display: flex;
+  gap: 14px;
+}
+.table-wrap {
+  overflow-x: auto;
+}
+.filter-bar {
+  align-items: flex-end;
+}
+.report-pre {
+  background: #0b1220;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 8px 0 0;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
 }

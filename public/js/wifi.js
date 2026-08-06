@@ -64,6 +64,30 @@
     }
   }
 
+  // 「隐藏 WiFi 白名单」：仅记录用户通过「添加隐藏 WiFi」显式添加并连通的 SSID。
+  // 轮询时只有这些 SSID 才豁免「必须可见」约束；其余历史 profile（如换地点后
+  // 扫不到的旧网络）仍按可见性过滤，避免每轮白白尝试一堆连不上的网络。
+  var HIDDEN_KEY = 'autoclaw_wifi_hidden_v1';
+  function loadHiddenList() {
+    try {
+      var v = JSON.parse(localStorage.getItem(HIDDEN_KEY));
+      return Array.isArray(v) ? v : [];
+    } catch (e) {
+      return [];
+    }
+  }
+  function setHidden(ssid, on) {
+    var list = loadHiddenList().filter(function (s) {
+      return s && s !== ssid;
+    });
+    if (on) list.push(ssid);
+    try {
+      localStorage.setItem(HIDDEN_KEY, JSON.stringify(list));
+    } catch (e) {
+      /* 忽略存储失败，不影响连接 */
+    }
+  }
+
   function setRefreshing(on) {
     if (!refreshBtn) return;
     refreshBtn.disabled = !!on;
@@ -294,4 +318,267 @@
 
   if (refreshBtn) refreshBtn.addEventListener('click', loadList);
   loadList();
+
+  // --- 添加隐藏 WiFi（不广播 SSID，直接输名称+密码连接，成功则本地记住）---
+  var hiddenSsidEl = document.getElementById('hidden-ssid');
+  var hiddenPwEl = document.getElementById('hidden-pw');
+  var hiddenBtn = document.getElementById('hidden-add-btn');
+  var hiddenMsgEl = document.getElementById('hidden-msg');
+  var hiddenRememberedEl = document.getElementById('hidden-remembered');
+
+  function showHiddenMsg(text, isError) {
+    if (!hiddenMsgEl) return;
+    if (!text) {
+      hiddenMsgEl.hidden = true;
+      return;
+    }
+    hiddenMsgEl.textContent = text;
+    hiddenMsgEl.hidden = false;
+    hiddenMsgEl.className = 'error-text' + (isError ? '' : ' ok');
+  }
+
+  // 渲染「已记住的 WiFi」（含隐藏）：来自 localStorage 的密码映射键集合
+  function renderRemembered() {
+    if (!hiddenRememberedEl) return;
+    var map = loadPwMap();
+    var keys = Object.keys(map).filter(function (k) {
+      return !!k;
+    });
+    if (!keys.length) {
+      hiddenRememberedEl.innerHTML = '';
+      return;
+    }
+    var html =
+      '<div class="remembered-title">已记住的 WiFi（含隐藏，可用于轮询）：</div><div class="remembered-chips">';
+    var hiddenList = loadHiddenList();
+    keys.forEach(function (ssid) {
+      var isHidden = hiddenList.indexOf(ssid) !== -1;
+      html +=
+        '<span class="remembered-chip">' +
+        escapeHtml(ssid) +
+        (isHidden ? '<span class="chip-tag">隐藏</span>' : '') +
+        '<button type="button" class="link-btn small faint" data-forget="' +
+        escapeHtml(ssid) +
+        '">忘记</button></span>';
+    });
+    html += '</div>';
+    hiddenRememberedEl.innerHTML = html;
+    Array.prototype.forEach.call(
+      hiddenRememberedEl.querySelectorAll('[data-forget]'),
+      function (btn) {
+        btn.addEventListener('click', function () {
+          var s = btn.getAttribute('data-forget');
+          savePw(s, '');
+          setHidden(s, false); // 同步移出隐藏白名单
+          renderRemembered();
+        });
+      },
+    );
+  }
+
+  function addHiddenWifi() {
+    if (!hiddenSsidEl || !hiddenPwEl || !hiddenBtn) return;
+    showHiddenMsg('', false);
+    var ssid = hiddenSsidEl.value.trim();
+    var password = hiddenPwEl.value;
+    if (!ssid) {
+      showHiddenMsg('请填写 WiFi 名称 (SSID)', true);
+      return;
+    }
+    hiddenBtn.disabled = true;
+    hiddenBtn.textContent = '连接中…';
+    fetch('/api/wifi/connect', {
+      method: 'POST',
+      headers: tokenHeaders(),
+      body: JSON.stringify({ ssid: ssid, password: password, hidden: true }),
+    })
+      .then(function (r) {
+        return r.json().then(function (data) {
+          return { status: r.status, data: data };
+        });
+      })
+      .then(function (r) {
+        hiddenBtn.disabled = false;
+        hiddenBtn.textContent = '添加并连接';
+        if (r.data && r.data.code === 0) {
+          if (password) savePw(ssid, password); // 连接成功：记住正确密码
+          setHidden(ssid, true); // 标记为隐藏网络，轮询时豁免可见性检查
+          showHiddenMsg('✅ ' + (r.data.message || '已连接') + '，已本地记住', false);
+          hiddenPwEl.value = '';
+          renderRemembered();
+        } else {
+          showHiddenMsg('⚠️ ' + ((r.data && r.data.message) || '连接失败'), true);
+        }
+      })
+      .catch(function (e) {
+        hiddenBtn.disabled = false;
+        hiddenBtn.textContent = '添加并连接';
+        showHiddenMsg('网络错误：' + e.message, true);
+      });
+  }
+
+  if (hiddenBtn) hiddenBtn.addEventListener('click', addHiddenWifi);
+  renderRemembered();
+
+  // --- 本机已存 WiFi：批量标记隐藏网络并纳入轮询 ---
+  // 隐藏网络的 Windows 配置文件若缺 nonBroadcast 标记，系统只在扫到广播时才连，
+  // 隐藏网永远连不上。这里一键修复 profile 并把 SSID 加入轮询白名单。
+  var savedListEl = document.getElementById('saved-list');
+  var savedMsgEl = document.getElementById('saved-msg');
+  var savedRefreshBtn = document.getElementById('saved-refresh');
+  var savedMarkBtn = document.getElementById('saved-mark-btn');
+  var savedSelAllBtn = document.getElementById('saved-select-all');
+  var savedSelNoneBtn = document.getElementById('saved-select-none');
+
+  function showSavedMsg(text, isError) {
+    if (!savedMsgEl) return;
+    if (!text) {
+      savedMsgEl.hidden = true;
+      return;
+    }
+    savedMsgEl.textContent = text;
+    savedMsgEl.hidden = false;
+    savedMsgEl.className = 'error-text' + (isError ? '' : ' ok');
+  }
+
+  function renderSaved(list) {
+    if (!savedListEl) return;
+    if (!list || !list.length) {
+      savedListEl.innerHTML = '<p class="hint">本机没有已保存的 WiFi 配置文件。</p>';
+      return;
+    }
+    var whitelist = loadHiddenList();
+    var html = '<div class="saved-items">';
+    list.forEach(function (it) {
+      var inPoll = whitelist.indexOf(it.ssid) !== -1;
+      var tags = '';
+      tags += it.visible
+        ? '<span class="chip-tag tag-visible">可见</span>'
+        : '<span class="chip-tag tag-invisible">扫不到</span>';
+      if (it.hidden) tags += '<span class="chip-tag tag-hidden">隐藏已标记</span>';
+      if (inPoll) tags += '<span class="chip-tag tag-poll">已纳入轮询</span>';
+      // 默认勾选「扫不到且尚未纳入轮询」的——正是需要修复的隐藏网络
+      var needFix = !it.visible && !(it.hidden && inPoll);
+      html +=
+        '<label class="saved-item"><input type="checkbox" class="saved-cb" value="' +
+        escapeHtml(it.ssid) +
+        '"' +
+        (needFix ? ' checked' : '') +
+        ' /><b>' +
+        escapeHtml(it.ssid) +
+        '</b>' +
+        tags +
+        '<span class="faint">' +
+        escapeHtml(it.auth || '') +
+        '</span></label>';
+    });
+    html += '</div>';
+    savedListEl.innerHTML = html;
+  }
+
+  function loadSaved() {
+    if (!savedRefreshBtn) return;
+    savedRefreshBtn.disabled = true;
+    savedRefreshBtn.textContent = '扫描中…';
+    showSavedMsg('', false);
+    fetch('/api/wifi/saved', { headers: tokenHeaders() })
+      .then(function (r) {
+        return r.json().then(function (data) {
+          return { status: r.status, data: data };
+        });
+      })
+      .then(function (r) {
+        savedRefreshBtn.disabled = false;
+        savedRefreshBtn.textContent = '扫描本机已存 WiFi';
+        var d = r.data;
+        if (!d || d.code !== 0 || !d.data) {
+          showSavedMsg((d && d.message) || '加载失败（HTTP ' + r.status + '）', true);
+          return;
+        }
+        renderSaved(d.data.list || []);
+      })
+      .catch(function (e) {
+        savedRefreshBtn.disabled = false;
+        savedRefreshBtn.textContent = '扫描本机已存 WiFi';
+        showSavedMsg('网络错误：' + e.message, true);
+      });
+  }
+
+  function selectedSavedSsids() {
+    if (!savedListEl) return [];
+    var out = [];
+    Array.prototype.forEach.call(savedListEl.querySelectorAll('.saved-cb'), function (cb) {
+      if (cb.checked) out.push(cb.value);
+    });
+    return out;
+  }
+
+  function markSelectedHidden() {
+    var ssids = selectedSavedSsids();
+    if (!ssids.length) {
+      showSavedMsg('请先勾选要标记为隐藏的 WiFi', true);
+      return;
+    }
+    savedMarkBtn.disabled = true;
+    savedMarkBtn.textContent = '标记中…';
+    showSavedMsg('', false);
+    fetch('/api/wifi/mark-hidden', {
+      method: 'POST',
+      headers: tokenHeaders(),
+      body: JSON.stringify({ ssids: ssids, hidden: true }),
+    })
+      .then(function (r) {
+        return r.json().then(function (data) {
+          return { status: r.status, data: data };
+        });
+      })
+      .then(function (r) {
+        savedMarkBtn.disabled = false;
+        savedMarkBtn.textContent = '标记为隐藏并纳入轮询';
+        var d = r.data;
+        if (!d || d.code !== 0 || !d.data) {
+          showSavedMsg((d && d.message) || '标记失败（HTTP ' + r.status + '）', true);
+          return;
+        }
+        var results = d.data.results || [];
+        var failed = [];
+        results.forEach(function (it) {
+          if (it.ok) setHidden(it.ssid, true); // 成功者纳入轮询白名单
+          else failed.push(it.ssid + '（' + (it.message || '失败') + '）');
+        });
+        if (failed.length) {
+          showSavedMsg(
+            '⚠️ 成功 ' + d.data.ok + ' 个，失败 ' + failed.length + ' 个：' + failed.join('；'),
+            true,
+          );
+        } else {
+          showSavedMsg('✅ 已标记 ' + d.data.ok + ' 个并纳入 WIFI 轮询序列', false);
+        }
+        renderRemembered();
+        loadSaved();
+      })
+      .catch(function (e) {
+        savedMarkBtn.disabled = false;
+        savedMarkBtn.textContent = '标记为隐藏并纳入轮询';
+        showSavedMsg('网络错误：' + e.message, true);
+      });
+  }
+
+  function setAllChecked(on) {
+    if (!savedListEl) return;
+    Array.prototype.forEach.call(savedListEl.querySelectorAll('.saved-cb'), function (cb) {
+      cb.checked = !!on;
+    });
+  }
+
+  if (savedRefreshBtn) savedRefreshBtn.addEventListener('click', loadSaved);
+  if (savedMarkBtn) savedMarkBtn.addEventListener('click', markSelectedHidden);
+  if (savedSelAllBtn)
+    savedSelAllBtn.addEventListener('click', function () {
+      setAllChecked(true);
+    });
+  if (savedSelNoneBtn)
+    savedSelNoneBtn.addEventListener('click', function () {
+      setAllChecked(false);
+    });
 })();

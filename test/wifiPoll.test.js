@@ -205,7 +205,8 @@ test('轮询：切换失败的 WIFI 被跳过，后续继续，整体仍 COMPLET
 
   assert.strictEqual(status, TaskStatus.COMPLETED, '跳过失败 WIFI 后整体完成');
   assert.strictEqual(ef.runCalls.length, 2, 'BAD 切换失败，仅 ROSNET5 与 GOOD 跑流程');
-  assert.deepStrictEqual(wifi.connectCalls, ['BAD', 'GOOD']);
+  // WIFI_SWITCH_MAX_RETRY 默认 3：BAD 切换失败会重试 3 次 connectSaved 后才跳过，故出现 3 次 BAD
+  assert.deepStrictEqual(wifi.connectCalls, ['BAD', 'BAD', 'BAD', 'GOOD']);
 
   const wp = wifiPollEvents(events);
   const failMsg = wp.find((e) => e.message.includes('切换『BAD』失败'));
@@ -382,4 +383,106 @@ test('v0.3.13：当前网络不在 rememberedWifis 但可见时仍置顶', async
   assert.strictEqual(wp[0].wifiTotal, 3, '总数应为 3（当前 + 2 已存）');
   assert.ok(wp[0].message.includes('ROSNET5'), '当前 ROSNET5 应被置顶');
   assert.deepStrictEqual(connectCalls, ['ROSNET2', 'HOME']);
+});
+
+// ---------------------------------------------------------------------------
+// 12) v0.3.48：隐藏 WiFi 白名单内的 SSID 豁免可见性检查（不广播仍可轮询）
+// ---------------------------------------------------------------------------
+test('v0.3.48：hiddenWifis 白名单内且已存凭证的不可见 SSID 应保留进轮询', async () => {
+  const remembered = ['HOME', 'MY_HIDDEN'];
+  const current = 'HOME';
+  const visible = ['HOME']; // MY_HIDDEN 是隐藏网络，扫描永远看不到
+  const connectCalls = [];
+  const wifi = {
+    getConnectableNetworks: async () => ['X'],
+    getCurrentSsid: async () => current,
+    listNetworks: async () => visible.map((s) => ({ ssid: s })),
+    listSavedProfiles: async () => new Set(['HOME', 'MY_HIDDEN']),
+    connectSaved: async (ssid) => { connectCalls.push(ssid); return { ok: true }; },
+  };
+  const ef = makeEngineFactory();
+  const cfg = {
+    taskId: 't-hidden-allow',
+    pollWifi: true,
+    rememberedWifis: remembered,
+    hiddenWifis: ['MY_HIDDEN'],
+  };
+
+  const { events } = await runWith(cfg, wifi, ef);
+
+  assert.strictEqual(ef.runCalls.length, 2, '隐藏网络 MY_HIDDEN 应保留，共跑 2 个');
+  assert.deepStrictEqual(connectCalls, ['MY_HIDDEN'], '当前 HOME 不切，应切到隐藏网络');
+  const wp = wifiPollEvents(events);
+  assert.strictEqual(wp[0].wifiTotal, 2);
+});
+
+// ---------------------------------------------------------------------------
+// 13) v0.3.48：不在白名单的「已存 profile 但扫不到」SSID 仍被剔除
+//     （回归防护：换地点后残留的旧 profile 如 ROSNET1-20 不应拖慢轮询）
+// ---------------------------------------------------------------------------
+test('v0.3.48：非白名单的不可见 SSID 即使有本机 profile 也应被剔除', async () => {
+  const remembered = ['HOME', 'ROSNET1', 'ROSNET2'];
+  const current = 'HOME';
+  const visible = ['HOME']; // ROSNET1/2 已搬离，扫不到
+  const connectCalls = [];
+  const wifi = {
+    getConnectableNetworks: async () => ['X'],
+    getCurrentSsid: async () => current,
+    listNetworks: async () => visible.map((s) => ({ ssid: s })),
+    // 本机仍残留这两个旧网络的凭证，但它们不是隐藏网络，只是不在范围内
+    listSavedProfiles: async () => new Set(['HOME', 'ROSNET1', 'ROSNET2']),
+    connectSaved: async (ssid) => { connectCalls.push(ssid); return { ok: true }; },
+  };
+  const ef = makeEngineFactory();
+  const cfg = {
+    taskId: 't-stale-profile',
+    pollWifi: true,
+    rememberedWifis: remembered,
+    hiddenWifis: [], // 没有任何隐藏网络
+  };
+
+  const { events } = await runWith(cfg, wifi, ef);
+
+  assert.strictEqual(ef.runCalls.length, 1, '仅剩可见的 HOME，扫不到的旧 profile 应被剔除');
+  assert.deepStrictEqual(connectCalls, [], '不应尝试切换到扫不到的网络');
+  const wp = wifiPollEvents(events);
+  assert.strictEqual(wp[0].wifiTotal, 1);
+});
+
+// ---------------------------------------------------------------------------
+// 14) v0.3.49：Windows profile 已标 nonBroadcast 的隐藏网络自动纳入轮询
+//     （无需前端白名单——系统标记即权威判据，换浏览器/清缓存也不丢）
+// ---------------------------------------------------------------------------
+test('v0.3.49：profile 标了 nonBroadcast 的不可见 SSID 应自动保留（无需 hiddenWifis）', async () => {
+  const remembered = ['HOME', 'ROSNET9', 'OLD_CAFE'];
+  const current = 'HOME';
+  const visible = ['HOME']; // ROSNET9 隐藏不广播；OLD_CAFE 是搬离的旧网络
+  const connectCalls = [];
+  const wifi = {
+    getConnectableNetworks: async () => ['X'],
+    getCurrentSsid: async () => current,
+    listNetworks: async () => visible.map((s) => ({ ssid: s })),
+    listSavedProfiles: async () => new Set(['HOME', 'ROSNET9', 'OLD_CAFE']),
+    // 系统层面只有 ROSNET9 被标记为「即使不广播也连接」
+    listSavedProfilesDetailed: async () => [
+      { ssid: 'HOME', hidden: false, visible: true },
+      { ssid: 'ROSNET9', hidden: true, visible: false },
+      { ssid: 'OLD_CAFE', hidden: false, visible: false },
+    ],
+    connectSaved: async (ssid) => { connectCalls.push(ssid); return { ok: true }; },
+  };
+  const ef = makeEngineFactory();
+  const cfg = {
+    taskId: 't-nonbroadcast',
+    pollWifi: true,
+    rememberedWifis: remembered,
+    // 刻意不传 hiddenWifis：验证仅凭系统标记即可纳入
+  };
+
+  const { events } = await runWith(cfg, wifi, ef);
+
+  assert.strictEqual(ef.runCalls.length, 2, '隐藏的 ROSNET9 应保留，搬离的 OLD_CAFE 应剔除');
+  assert.deepStrictEqual(connectCalls, ['ROSNET9'], '应切到隐藏网络，不碰 OLD_CAFE');
+  const wp = wifiPollEvents(events);
+  assert.strictEqual(wp[0].wifiTotal, 2);
 });

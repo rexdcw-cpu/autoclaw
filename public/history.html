@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>autoclaw · 任务历史</title>
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="page-head">
+        <h1>任务历史</h1>
+        <nav class="nav-links">
+          <a class="link-home" href="/">← 配置</a>
+          <a class="link-home" href="/progress.html">任务进度</a>
+          <a class="link-home" href="/campaigns.html">批量任务</a>
+        </nav>
+      </header>
+
+      <p class="subtitle">所有执行过的任务（含数据库台账与早期仅落盘的 JSON 任务），点击「详情」查看执行过程与结果。</p>
+
+      <!-- 筛选 -->
+      <section class="card">
+        <div class="row filter-bar">
+          <div class="col" style="flex: 1 1 320px">
+            <input type="text" id="filter-search" placeholder="搜索 taskId / 关键词 / 目标域名" />
+          </div>
+          <div class="col" style="flex: 0 0 160px">
+            <select id="filter-status">
+              <option value="">全部状态</option>
+              <option value="running">运行中</option>
+              <option value="completed">已完成</option>
+              <option value="failed">已失败</option>
+              <option value="stopped">已停止</option>
+              <option value="paused">已暂停</option>
+              <option value="pending">等待中</option>
+            </select>
+          </div>
+          <div class="col" style="flex: 0 0 auto">
+            <button id="refresh-btn" type="button">刷新</button>
+          </div>
+        </div>
+        <p class="hint" id="list-count">加载中…</p>
+      </section>
+
+      <!-- 列表 -->
+      <section class="card">
+        <div class="table-wrap">
+          <table class="summary-table" id="task-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>状态</th>
+                <th>平台</th>
+                <th>关键词</th>
+                <th>目标域名</th>
+                <th>来源</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="task-tbody">
+              <tr><td colspan="7" class="muted">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 详情 -->
+      <section class="card" id="detail" hidden>
+        <div class="log-head">
+          <h2 id="detail-title">任务详情</h2>
+          <button id="detail-close" type="button" class="link-btn small">收起</button>
+        </div>
+        <div id="detail-body"></div>
+      </section>
+    </main>
+
+    <script src="/js/history.js"></script>
+  </body>
+</html>

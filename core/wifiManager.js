@@ -164,8 +164,35 @@ function normalizeSecurity(authRaw, encRaw) {
   return null;
 }
 
-/** 生成 WLAN 配置文件 XML（带 UTF-8 BOM 由调用方写入）。 */
-function buildProfileXml(ssid, authentication, encryption, password) {
+/**
+ * 隐藏网络的候选安全类型列表（供 connect 的 hidden 分支使用）。
+ * 覆盖 WPA2/AES、WPA3/AES、WPA2/TKIP、WPA1/TKIP、WPA1/AES。
+ * 旧实现只试 WPAPSK/AES，缺 TKIP，导致 WPA1/TKIP 隐藏网（如 ROSNET2~5/10~12）连不上。
+ * 注意：不能只用「已存 profile 的安全类型」——netsh 的 profile 信息只报
+ * 「WPA - 个人」不含 TKIP 细节，normalizeSecurity 默认 AES，反而连不上 TKIP 网；
+ * 因此统一用含 TKIP 的候选列表逐个尝试，由系统决定哪个能连。
+ * @param {string} [password]
+ * @returns {Array<{authentication:string, encryption:string}>}
+ */
+function hiddenCandidates(password) {
+  if (!password) return [{ authentication: 'open', encryption: 'none' }];
+  return [
+    { authentication: 'WPA2PSK', encryption: 'AES' },
+    { authentication: 'WPA3SAE', encryption: 'AES' },
+    { authentication: 'WPA2PSK', encryption: 'TKIP' },
+    { authentication: 'WPAPSK', encryption: 'TKIP' },
+    { authentication: 'WPAPSK', encryption: 'AES' },
+  ];
+}
+
+/**
+ * 生成 WLAN 配置文件 XML（带 UTF-8 BOM 由调用方写入）。
+ * @param {object} [opts]
+ * @param {boolean} [opts.nonBroadcast] 隐藏网络（不广播 SSID）必须置 true，
+ *        否则 Windows 只在「扫描到该 SSID 广播」时才连接，隐藏网永远连不上。
+ */
+function buildProfileXml(ssid, authentication, encryption, password, opts) {
+  const nonBroadcast = !!(opts && opts.nonBroadcast);
   let security;
   if (authentication === 'open') {
     security =
@@ -206,6 +233,7 @@ function buildProfileXml(ssid, authentication, encryption, password) {
     escapeXml(ssid) +
     '</name>\n' +
     '        </SSID>\n' +
+    (nonBroadcast ? '        <nonBroadcast>true</nonBroadcast>\n' : '') +
     '    </SSIDConfig>\n' +
     '    <connectionType>ESS</connectionType>\n' +
     '    <connectionMode>auto</connectionMode>\n' +
@@ -235,60 +263,120 @@ async function listNetworks(iface) {
  * 切换到指定 WiFi。
  * @param {string} ssid
  * @param {string} password 仅 secured 网络需要
+ * @param {object} [opts]
+ * @param {boolean} [opts.hidden] 隐藏网络（不广播 SSID）：跳过「必须可见」检查，
+ *        按个人网常见安全类型依次尝试直连。
  * @returns {Promise<{ok:boolean, code?:string, message:string, diagnostics?:object}>}
  */
-async function connect(ssid, password) {
+async function connect(ssid, password, opts) {
+  opts = opts || {};
   const iface = await getInterface();
   const nets = await listNetworks(iface);
   const net = nets.find((n) => n.ssid === ssid);
-  if (!net) {
+
+  let candidates;
+  if (net) {
+    const sec = normalizeSecurity(net.auth, net.enc);
+    if (!sec) {
+      return {
+        ok: false,
+        code: 'ERR_WIFI_UNSUPPORTED',
+        message: '『' + ssid + '』是企业网络（需账号/证书），暂不支持',
+      };
+    }
+    if (sec.authentication !== 'open' && !password) {
+      return { ok: false, code: 'ERR_WIFI_NEED_PASSWORD', message: '该网络需要密码' };
+    }
+    candidates = [sec];
+  } else if (opts.hidden) {
+    // 隐藏网络：未出现在扫描中，无法自动判定安全类型。
+    // 已存 profile 且用户未手输密码 → 直接连已存 profile（安全类型 100% 正确，隐藏网也适用）；
+    // 否则用真实安全类型（若有 profile）或常见组合（含 WPA1/TKIP）尝试。
+    let savedInfo = null;
+    try {
+      savedInfo = await getProfileInfo(ssid);
+    } catch (e) {
+      /* 读取失败按无 profile 处理 */
+    }
+    if (savedInfo && !password) {
+      const sec = normalizeSecurity(savedInfo.auth, '');
+      if (sec) return await connectSaved(ssid);
+    }
+    candidates = hiddenCandidates(password);
+  } else {
     return {
       ok: false,
       code: 'ERR_WIFI_NOT_FOUND',
       message: '未找到网络『' + ssid + '』，可能已不在范围内',
     };
   }
-  const sec = normalizeSecurity(net.auth, net.enc);
-  if (!sec) {
-    return {
-      ok: false,
-      code: 'ERR_WIFI_UNSUPPORTED',
-      message: '『' + ssid + '』是企业网络（需账号/证书），暂不支持',
-    };
-  }
-  if (sec.authentication !== 'open' && !password) {
-    return { ok: false, code: 'ERR_WIFI_NEED_PASSWORD', message: '该网络需要密码' };
-  }
 
-  const xml = buildProfileXml(ssid, sec.authentication, sec.encryption, password || '');
-  const tmp = path.join(os.tmpdir(), '_autoclaw_wifi_' + Math.abs(hashStr(ssid)) + '.xml');
-  // UTF-8 BOM：netsh 才能正确解析含中文的 SSID
-  fs.writeFileSync(tmp, '﻿' + xml, 'utf8');
-  try {
-    const add = await runNetsh(
-      'add profile filename="' + tmp + '" user=current interface="' + iface + '"',
-    );
-    const conn = await runNetsh(
-      'connect name="' + ssid + '" ssid="' + ssid + '" interface="' + iface + '"',
-    );
-    for (let i = 0; i < 5; i++) {
-      const cur = await getCurrentSsid(iface);
-      if (cur === ssid) return { ok: true, message: '已连接到『' + ssid + '』' };
-      await sleep(1000);
+  let lastDiag = null;
+  for (const sec of candidates) {
+    if (!net && opts.hidden) {
+      // 隐藏网按候选逐个尝试时，必须先清掉上一个候选写下的 profile，
+      // 否则后续候选（如 WPA3/TKIP）的 add 会因「已存在」冲突被吞，
+      // 导致那些安全类型永远不被真正尝试 → 非 WPA2 的隐藏网永远连不上。
+      try {
+        await runNetsh('delete profile name="' + ssid + '"');
+      } catch (e) {
+        /* 无 profile 时忽略 */
+      }
     }
-    return {
-      ok: false,
-      code: 'ERR_WIFI_CONNECT_FAILED',
-      message: '连接未完成（可能是密码错误或信号太弱）',
-      diagnostics: { add: add, conn: conn },
-    };
-  } finally {
+    // 隐藏网络（扫描不到、由调用方声明 hidden）必须写 nonBroadcast，否则
+    // Windows 不会主动探测该 SSID，profile 建了也连不上。
+    const xml = buildProfileXml(ssid, sec.authentication, sec.encryption, password || '', {
+      nonBroadcast: !net && !!opts.hidden,
+    });
+    const tmp = path.join(os.tmpdir(), '_autoclaw_wifi_' + Math.abs(hashStr(ssid)) + '.xml');
+    // UTF-8 BOM：netsh 才能正确解析含中文的 SSID
+    fs.writeFileSync(tmp, '﻿' + xml, 'utf8');
     try {
-      fs.unlinkSync(tmp);
+      const add = await runNetsh(
+        'add profile filename="' + tmp + '" user=current interface="' + iface + '"',
+      );
+      // 隐藏网络：netsh connect 不做定向探测（且不支持 ssid= 参数），必须用
+      // WlanConnect API 显式带 SSID 才会主动 probe 该隐藏 SSID。可见网络仍走
+      // netsh connect（更快、行为不变）。
+      const conn = !net && opts.hidden
+        ? await wlanConnectDirected(ssid, { interface: iface, timeout: 30 })
+        : await runNetsh('connect name="' + ssid + '" interface="' + iface + '"');
+      for (let i = 0; i < 5; i++) {
+        const cur = await getCurrentSsid(iface);
+        if (cur === ssid) {
+          return {
+            ok: true,
+            message:
+              '已连接到『' + ssid + '』' +
+              (candidates.length > 1 ? '（' + sec.authentication + '）' : ''),
+          };
+        }
+        await sleep(1000);
+      }
+      lastDiag = {
+        authentication: sec.authentication,
+        add: add,
+        conn: conn,
+        note: 'connected-but-ssid-not-current',
+      };
     } catch (e) {
-      /* 忽略清理失败 */
+      // 该安全类型的 profile 不被系统支持（如旧系统无 WPA3SAE），
+      // 或 connect 即时失败：记录诊断并继续下一个候选，而不是抛出导致 HTTP 500。
+      lastDiag = { authentication: sec.authentication, error: String((e && e.message) || e) };
+    } finally {
+      try {
+        fs.unlinkSync(tmp);
+      } catch (e) {
+        /* 忽略清理失败 */
+      }
     }
   }
+  return {
+    ok: false,
+    code: 'ERR_WIFI_CONNECT_FAILED',
+    message: '连接未完成（可能是密码错误、信号太弱，或本机不支持该安全类型）',
+    diagnostics: lastDiag,
+  };
 }
 
 /**
@@ -308,6 +396,121 @@ async function listSavedProfiles() {
   return set;
 }
 
+/** netsh「网络广播」行：已标记隐藏时显示「即使网络未广播也连接」。 */
+const HIDDEN_MARK_RE =
+  /即使网络未广播也连接|即使此网络未进行广播也连接|Connect even if this network is not broadcasting/i;
+
+/**
+ * 读取单个 WLAN 配置文件信息。
+ * @param {string} ssid
+ * @returns {Promise<null|{ssid:string, hidden:boolean, auth:string}>} 无此配置文件返回 null
+ */
+async function getProfileInfo(ssid) {
+  const text = String((await runNetsh('show profile name="' + ssid + '"')) || '');
+  // 有效 profile 输出必含「网络广播 / SSID 名称」字段；否则视为不存在
+  if (!/(网络广播|Network broadcast|SSID 名称|SSID name)/i.test(text)) return null;
+  const am = text.match(/(?:身份验证|Authentication)\s*:\s*(.+)/);
+  return {
+    ssid: ssid,
+    hidden: HIDDEN_MARK_RE.test(text),
+    auth: am ? am[1].trim() : '',
+  };
+}
+
+/**
+ * 列出本机已存 WLAN 配置文件及其状态。
+ * hidden=是否已标记「即使不广播也连接」，visible=当前扫描是否可见。
+ * @returns {Promise<Array<{ssid:string, hidden:boolean, visible:boolean, auth:string}>>}
+ */
+async function listSavedProfilesDetailed() {
+  const saved = Array.from(await listSavedProfiles());
+  let visibleSet = new Set();
+  try {
+    const visible = await listNetworks();
+    visibleSet = new Set(visible.map((n) => n.ssid));
+  } catch (e) {
+    /* 扫描失败则全部按不可见处理，不影响列表本身 */
+  }
+  const out = [];
+  for (const ssid of saved) {
+    let info = null;
+    try {
+      info = await getProfileInfo(ssid);
+    } catch (e) {
+      /* 单条读取失败不影响整体 */
+    }
+    out.push({
+      ssid: ssid,
+      hidden: !!(info && info.hidden),
+      visible: visibleSet.has(ssid),
+      auth: (info && info.auth) || '',
+    });
+  }
+  return out;
+}
+
+/**
+ * 把本机已存的 WLAN 配置文件标记为「隐藏网络」（nonBroadcast=true）。
+ *
+ * 隐藏 WiFi 不广播 SSID，若 profile 未标记 nonBroadcast，Windows 只在扫描到广播
+ * 时才连接 → 隐藏网永远连不上（表现为「信号弱或凭证失效」）。
+ * 做法：导出现有 profile（key=clear 保留密码）→ 注入/改写 nonBroadcast → 重新
+ * 导入覆盖，安全类型与密码原样保留，用户无需重新输入。
+ *
+ * @param {string} ssid
+ * @param {boolean} [hidden=true] 传 false 可撤销标记
+ * @returns {Promise<{ok:boolean, ssid:string, changed?:boolean, hidden?:boolean, code?:string, message:string, diagnostics?:object}>}
+ */
+async function markProfileHidden(ssid, hidden) {
+  const want = hidden !== false;
+  const iface = await getInterface();
+  const before = await getProfileInfo(ssid);
+  if (!before) {
+    return {
+      ok: false,
+      ssid: ssid,
+      code: 'ERR_WIFI_PROFILE_NOT_FOUND',
+      message: '本机没有『' + ssid + '』的配置文件',
+    };
+  }
+  if (before.hidden === want) {
+    return {
+      ok: true,
+      ssid: ssid,
+      changed: false,
+      hidden: want,
+      message: '『' + ssid + '』已是' + (want ? '隐藏' : '普通') + '标记，无需改动',
+    };
+  }
+
+    // 关键修复：直接改 nonBroadcast 标记，不导出 / 不重新导入 profile。
+  // 旧实现「导出 → 改写 → 重导」在本机禁止 key=clear 明文导出时，会把密码
+  // （DPAPI 加密的 keyMaterial）一并重导，导致密码损坏、隐藏网连不上
+  // （表现为 ROSNET1 连上又断、ROSNET2 直接「无法用于连接」）。
+  // set profileparameter 由 Windows 原生支持，只改这一个标记，密码与安全类型原样保留。
+  const ifaceArg = iface ? ' interface="' + iface + '"' : '';
+  await runNetsh(
+    'set profileparameter name="' + ssid + '"' + ifaceArg + ' nonBroadcast=' + (want ? 'yes' : 'no'),
+  );
+  const after = await getProfileInfo(ssid);
+  if (after && after.hidden === want) {
+    return {
+      ok: true,
+      ssid: ssid,
+      changed: true,
+      hidden: want,
+      message: '『' + ssid + '』已标记为' + (want ? '隐藏' : '普通') + '网络',
+    };
+  }
+  return {
+    ok: false,
+    ssid: ssid,
+    code: 'ERR_WIFI_MARK_FAILED',
+    message: '『' + ssid + '』标记未生效（可能需要管理员权限）',
+    diagnostics: { before: before.hidden, after: after ? after.hidden : null },
+  };
+}
+
 /**
  * 取「可见且本机已保存凭证」的 WIFI 列表（顺序同前端可见列表）。
  * 这些 WIFI 可无密码直连（netsh wlan connect），即轮询所需的「可用 WIFI」。
@@ -322,9 +525,22 @@ async function getConnectableNetworks() {
   // （connectSaved 8s 轮询后报「信号弱或凭证失效」），纳入轮询只会白白占一轮
   // 并拉低完成率。连不上的网络本就不应出现在序列里。
   // 因此与当前扫描到的可见网络取交集，序列=「当前能搜到且本机有凭证」的 WIFI。
+  //
+  // 例外：标记了 nonBroadcast 的隐藏网络本就不会出现在扫描结果里，但凭 profile 名
+  // 可以直连（实测 2~3s 连上），必须保留，否则隐藏网永远进不了轮询。
   const visible = await listNetworks();
   const visibleSet = new Set(visible.map((n) => n.ssid));
-  const arr = Array.from(saved).filter((ssid) => visibleSet.has(ssid));
+  const hiddenSet = new Set();
+  for (const ssid of saved) {
+    if (visibleSet.has(ssid)) continue;
+    try {
+      const info = await getProfileInfo(ssid);
+      if (info && info.hidden) hiddenSet.add(ssid);
+    } catch (e) {
+      /* 单条读取失败按不可用处理 */
+    }
+  }
+  const arr = Array.from(saved).filter((ssid) => visibleSet.has(ssid) || hiddenSet.has(ssid));
   // 当前已连的置顶作为轮询起点（当前网络一定在可见集合里，故必被保留）。
   const cur = await getCurrentSsid();
   if (cur && arr.includes(cur)) {
@@ -338,7 +554,61 @@ async function getConnectableNetworks() {
 }
 
 /**
+ * 用 WlanConnect Win32 API 显式带上 SSID 做「定向探测」后连接。
+ *
+ * 这是隐藏 WiFi 能连上的唯一可靠方式：netsh 的 `wlan connect` 不向系统传入
+ * SSID（其语法只有 name/interface，所谓 `ssid=` 参数被静默忽略），因此 Windows
+ * 只对「扫描缓存里已有的 SSID」发起连接；隐藏网的 SSID 在缓存里是空的，于是
+ * 永远报 "not available to connect"。connectionMode=auto 也不会自动连（实测等
+ * 90s 无果）。必须走 WlanConnect 并传 pDot11Ssid，Windows 才会主动 probe 该 SSID。
+ *
+ * 通过 PowerShell 调用 wlanapi.dll 的 P/Invoke 实现（Windows 自带，无额外运行时
+ * 依赖）。脚本内部会先精简自身环境变量，避免在环境块被撑大的 shell 里 Add-Type
+ * 因超过 65535 字节上限而失败。
+ *
+ * @param {string} ssid
+ * @param {object} [opts] { interface?, timeout? }
+ * @returns {Promise<{ok:boolean, code?:string, message:string, diagnostics?:object}>}
+ */
+const PS_WLANCONNECT = path.join(__dirname, 'wlanconnect.ps1');
+
+async function wlanConnectDirected(ssid, opts) {
+  opts = opts || {};
+  const timeout = opts.timeout || 30;
+  const cli = [
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', PS_WLANCONNECT,
+    '-Profile', ssid,
+    '-Ssid', ssid,
+    '-Timeout', String(timeout),
+  ];
+  const quoted = cli.map((a) => '"' + String(a).replace(/"/g, '\\"') + '"').join(' ');
+  return new Promise((resolve) => {
+    exec(
+      'powershell ' + quoted,
+      { encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true },
+      (err, stdout, stderr) => {
+        const out = ((stdout || '') + (stderr || '')).trim();
+        if (/OK:\s*connected/i.test(out)) {
+          resolve({ ok: true, message: '已连接到『' + ssid + '』（定向探测）' });
+          return;
+        }
+        const m = out.match(/FAIL:\s*(.+)$/m);
+        resolve({
+          ok: false,
+          code: 'ERR_WIFI_CONNECT_FAILED',
+          message: m ? m[1].trim() : out || 'WlanConnect 调用失败',
+          diagnostics: { raw: out },
+        });
+      },
+    );
+  });
+}
+
+/**
  * 切换到本机已保存凭证的 WIFI（无需密码，直接 netsh wlan connect）。
+ * 隐藏网络：netsh connect 不做定向探测会失败，自动回退到 WlanConnect 显式带 SSID。
  * @param {string} ssid
  * @returns {Promise<{ok:boolean, code?:string, message:string}>}
  */
@@ -349,6 +619,24 @@ async function connectSaved(ssid) {
     const cur = await getCurrentSsid(iface);
     if (cur === ssid) return { ok: true, message: '已连接到『' + ssid + '』' };
     await sleep(1000);
+  }
+  // 隐藏网络：netsh connect 不做定向探测会失败 → 改用 WlanConnect 显式带 SSID。
+  let hidden = false;
+  try {
+    const info = await getProfileInfo(ssid);
+    hidden = !!(info && info.hidden);
+  } catch (e) {
+    /* 读取失败按非隐藏 */
+  }
+  if (hidden) {
+    const d = await wlanConnectDirected(ssid, { interface: iface, timeout: 30 });
+    if (d.ok) return d;
+    return {
+      ok: false,
+      code: 'ERR_WIFI_CONNECT_FAILED',
+      message: '切换至隐藏网络『' + ssid + '』未完成（' + (d.message || '定向探测失败') + '）',
+      diagnostics: Object.assign({ conn }, d.diagnostics || {}),
+    };
   }
   return {
     ok: false,
@@ -365,12 +653,17 @@ module.exports = {
   getCurrentSsid,
   parseNetworks,
   normalizeSecurity,
+  hiddenCandidates,
   buildProfileXml,
   listNetworks,
   connect,
   listSavedProfiles,
+  getProfileInfo,
+  listSavedProfilesDetailed,
+  markProfileHidden,
   getConnectableNetworks,
   connectSaved,
+  wlanConnectDirected,
   getLocalIp,
   getWifiLocalIp,
   getPublicGeo,

@@ -22,6 +22,7 @@ const taskRoutes = require('./routes/taskRoutes');
 const clientRoutes = require('./routes/clientRoutes');
 const wifiRoutes = require('./routes/wifiRoutes');
 const taskManager = require('./core/taskManager');
+const { scheduler } = require('./core/scheduler');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -73,6 +74,9 @@ app.use('/api/client', taskTokenAuth, clientRoutes);
 // /api/wifi/* 全部经鉴权中间件保护（WiFi 检测与切换面板）
 app.use('/api/wifi', taskTokenAuth, wifiRoutes);
 
+// /api/campaign/* 全部经鉴权中间件保护（批量定时任务）
+app.use('/api/campaign', taskTokenAuth, require('./routes/schedulerRoutes'));
+
 // 健康检查（不鉴权，供 Nginx/监控探活）
 app.get('/api/status', (req, res) => {
   const active = taskManager.getActiveStatus();
@@ -102,9 +106,10 @@ app.use(
   }),
 );
 
-// 友好的页面别名（UI 文案为 /task-config、/task-progress）
+// 友好的页面别名（UI 文案为 /task-config、/task-progress、/task-history）
 app.get('/task-config', (req, res) => res.redirect('/'));
 app.get('/task-progress', (req, res) => res.redirect('/progress.html'));
+app.get('/task-history', (req, res) => res.redirect('/history.html'));
 
 // 兜底 404（JSON 风格，便于前端统一处理）
 app.use((req, res) => {
@@ -136,6 +141,16 @@ io.on('connection', (socket) => {
 
 // 注入 socket.io 实例，使 manager 能把 IPC 事件转发到对应房间
 taskManager.init(io);
+// 启动时清理上次进程残留的僵尸活跃任务（pending/running），并启动运行看门狗
+taskManager.reapZombieTasks().catch(() => {});
+taskManager.startWatchdog();
+
+// 启动批量定时任务调度器（加载 campaign、清理残留运行态、启动巡检定时器）
+scheduler.setIo(io);
+scheduler.start().catch((e) => {
+  // eslint-disable-next-line no-console
+  console.error('[autoclaw] 调度器启动失败:', (e && e.message) ? e.message : e);
+});
 
 // ---------------------------------------------------------------------------
 // 启动

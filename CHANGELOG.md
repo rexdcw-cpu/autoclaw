@@ -4,6 +4,201 @@
 
 ---
 
+## [0.3.58] — 2026-08-05
+
+### Fixed（拟人微动作挂死导致整任务卡死，被看门狗强杀）
+
+- **现象**：任务 7f8a0c6d（baidu+google 双平台，manincorp.cn）运行 ~118 分钟、状态 `failed`，且无 `task_end` 事件；最后日志 `05:50:24 google search success`，`updated_at=06:00:40`，中间 **10 分 16 秒零日志空白**（= 看门狗阈值 `AUTOCLAW_WATCHDOG_MS` 默认 600000），即卡死后被看门狗强杀。时间差分析无 >53s 单点停顿，说明卡在「两次 emit 之间」的 await。
+- **根因**：`core/taskEngine.js` 的 `_betweenSteps`（步骤间拟人微动作）**裸调 `_humanInterstitial`，未走 `_runStep`/`_softStep` 的 `withTimeout` 保护**。而 `_humanInterstitial` 内部的 Playwright 微动作（`page.$$('a')`/`el.hover()`/`mouse.*`）在页面处于异常状态（导航中、JS dialog、context 销毁）时可能 **pending 永不 resolve**；其自带 try/catch 只挡 rejection 挡不住 hang，故整个 round 永久卡在 search→locate 之间，主进程无感知，只能靠看门狗兜底。
+- **修复**：新增常量 `HUMAN_INTERSTITIAL_TIMEOUT_MS=15000`；`_betweenSteps` 将 `_humanInterstitial` 整体包 `withTimeout(15s)`，超时即 `catch` 兜底为 `action:'timeout'`（不影响主流程），杜绝无限 await。该值远大于正常 thinkMs(≤3s)+微动作耗时(<2s)，不会误杀正常拟人动作。
+- **验证**：`node --test test/*.test.js` 全绿（未设 AUTOCLAW_DB_TYPE，符合单测铁律）；已重启服务 `/api/status`→`0.3.58`。
+- **附带观察（非本次修复范围）**：该任务谷歌阶段另有 15 次 `google locate failed`（round 0/1/2 反复，05:14–05:44），属 locate 命中失败（节点限流/结果页结构/关键词），由 `_runStep` 正常重试并跳过该轮，**非卡死原因**；后续可单独评估谷歌 locate 稳定性。
+
+## [0.3.57] — 2026-08-05
+
+### Fixed（谷歌阶段 round 计数错乱 + browse 软步骤挂满 60s 被吞）
+
+- **现象**：任务 175d4e8b（baidu+google 双平台，manincorp.cn/万年移民）日志暴露两处异常：① 谷歌阶段进度轮次显示成 `3/3、4/3、5/3`（roundIndex > totalRounds），与百度阶段正常的 `1/3、2/3、3/3` 不一致；② 谷歌 7 个轮次的 `browse` 步骤记 `动作超时（60000ms）` 失败，但任务整体仍报 `completed`、完成度统计「100% 完成 / 0 失败」——实际那 7 轮的站内浏览（SEO 动作）没做。
+- **根因 1（显示 bug）**：`core/taskEngine.js` 的 `eng.run` 对所有平台轮次做分阶段按节点轮询时，只把 `totalRounds` 改成子数组长度（谷歌 3），却保留了 `buildRounds` 给的全局 `roundIndex`（百度排第一占 0/1/2，谷歌原始是 3/4/5），导致 `roundIndex > totalRounds`。
+- **根因 2（功能 bug）**：谷歌 `_inSiteBrowse` 跳转到「联系/关于」子页时用满 `actionTimeoutMs=60000` 做导航超时；子页慢/不可达就卡满 60s，造成「任务卡死」假象。又因 `browse` 是软步骤（`_softStep`），失败只记日志、节点仍判成功，报告「100% 完成」却没做站内浏览。
+- **修复**：① 抽出纯函数 `P.normalizeRounds(baseRounds)`，把子数组内 `roundIndex` 重新编号为 0-based、`totalRounds=子数组长度`，`eng.run` 复用它（谷歌现正确显示 `1/3、2/3、3/3`）；② `_inSiteBrowse` 给子页导航单独设较短超时（上限 20s），并用 try/catch 包裹——子页加载慢/不可达时不再卡满 60s，仍滚动当前页保留浏览价值，消除「卡死」观感与静默漏做。
+- **测试**：新增 `test/normalizeRounds.test.js`（2 例）验证子数组内 roundIndex 重编号 + 空/非数组安全；`progressEvent`/`phasedTask`/`browseRelativeLink` 单测全绿（phashedTask 10/10、progressEvent 24/24）。
+
+### 诊断结论（针对 Master 疑问「是不是有什么任务卡住了」）
+
+- 当前**无任务卡住**：实时 autoclaw 服务（7788）`activeTaskId: null`、空闲；任务 175d4e8b 已于 2026-08-04 13:14 `completed`。日志里那些 60 秒「停顿」不是卡死，是上述谷歌 browse 软步骤真超时（已修复为 ≤20s）。
+
+
+### Fixed（WiFi 切换失败直接跳过 → 加应用层重试兜底）
+
+- **现象**：任务 c039dba7（baidu+google 双平台，manincorp.cn/万年移民）百度阶段 21 个 WIFI 中，ROSNET19 被 `skipped`（error「切换至隐藏网络『ROSNET19』未完成（not connected to ROSNET19 within 30s）」），整体 `partial`、完成率 95%。根因：`scripts/worker.js` 第 542/685 行 `wm.connectSaved(ssid)` 失败即 `recordWifi(... 'skipped', attempts:0)` 直接放弃该网，**不重试切换**。
+- **真因**：ROSNET19 紧挨 ROSNET18 完成后切换，WLAN 服务仍在处理上一连接状态时发起下一个 `WlanConnect` 竞争失败（v0.3.54 时代无断开前置；v0.3.55 的 `wlanconnect.ps1` 已在 WlanConnect 前 `netsh wlan disconnect`+2s 缓解，但瞬时竞争仍可能偶发）。该任务跑在 04:37（v0.3.55 加固 12:15 后才上线），故命中老竞争。
+- **修复**：`worker.js` 切换 WiFi 加应用层重试循环 `WIFI_SWITCH_MAX_RETRY`（默认 3，环境变量 `AUTOCLAW_WIFI_SWITCH_RETRY` 可配）；每次 `connectSaved` 失败重试前发进度事件并 `retryWait(RETRY_GAP_MS)`，仍全失败才 `skipped`。百度/谷歌两阶段切换逻辑同步修改。与 v0.3.55 的 ps1 断开前置形成「应用层重试 + 系统层断开」双重兜底。
+- **测试**：`test/wifiPoll.test.js` 的「切换失败的 WIFI 被跳过」断言更新为 `connectCalls === ['BAD','BAD','BAD','GOOD']`（重试 3 次后跳过）；worker/wifi 相关单测 36/36 通过。
+- **附带观察（非 BUG）**：ROSNET12 百度阶段流程重试 3 次、耗时 27 分钟（attempts=4, retriesUsed=3）属流程层重试（连接成功、百度流程某步超时），非切换失败；疑为 ROSNET12 网络慢/不稳，交由后续观察，不 blocking。
+
+## [0.3.55] — 2026-08-04
+
+### Fixed（连续切隐藏网竞争：WlanConnect 前先断开当前连接）
+
+- **现象**：批量轮询快速连续切多个 ROSNET 隐藏网时，个别网（ROSNET5、ROSNET8）偶发 `not connected within 30s`，但从已连状态单独重测该网却能连上——属 **WLAN 服务仍在处理上一个连接状态**时发起下一个 `WlanConnect` 导致的竞争失败，并非网络/密码问题。
+- **修复**：`core/wlanconnect.ps1` 在调用 `WlanConnect` 前先 `netsh wlan disconnect` 并等待 2 秒，确保接口处于干净断开态再发起定向探测。已实测竞争场景（ROSNET4→5、ROSNET7→8 紧挨着连）全部 `OK`，连续切网不再假失败。
+- **配套事实修正**：v0.3.54 验证中 ROSNET5/8 的失败曾一度被疑为覆盖/物理距离问题，实测从干净状态单测可连，已排除；真因为本机 ROSNET profile 认证类型被错建为 WPA1（WPAPSK），重建为 WPA2/AES/12345678 后 ROSNET1–30 全部可连（见 v0.3.54 及「ROSNET profile 批量重建」）。
+
+## [0.3.54] — 2026-08-03
+
+### Fixed（隐藏 WiFi 连不上的真正根因：netsh 不做定向探测，必须用 WlanConnect 带 SSID）
+
+- **根因（真 bug，致命，覆盖所有隐藏网）**：隐藏 WiFi 连不上的根因**不是密码、不是覆盖、不是 WLAN AutoConfig 卡死**，而是 **Windows `netsh wlan connect` 不会对隐藏 SSID 做「定向探测（directed probe）」**。netsh 的 `wlan connect` 语法只有 `name`/`interface`，所谓 `ssid=` 参数被静默忽略；它只对「扫描缓存里已存在的 SSID」发起连接，而隐藏网的 SSID 在缓存里是空的（扫描显示为 `SSID:` 空），于是永远报 `The network specified by profile "X" is not available to connect`。`connectionMode=auto` + `nonBroadcast` 也不会自动连（实测等 90s 无果）。**GUI 点连接能成，是因为 GUI 走 `WlanConnect` API 并显式带上 SSID，触发 Windows 对这个 SSID 主动 probe。**
+- **决定性验证**：① 用 Python `ctypes` 直接调 `wlanapi.dll` 的 `WlanConnect`（显式传 `pDot11Ssid`），**4 秒连上 ROSNET2**（密码 `12345678` 鉴权成功、物理覆盖正常）；② `netsh wlan connect` 与 `connectionMode=auto` 两条路均失败——证实根因就是「缺定向探测」。
+- **修复**：新增 `core/wlanconnect.ps1`（PowerShell P/Invoke 调 `WlanConnect`，显式传 SSID 做定向探测；脚本开头先精简自身环境变量，避免在环境块被撑大的 shell 里 `Add-Type` 因超过 65535 字节上限而失败），并在 `core/wifiManager.js` 暴露 `wlanConnectDirected(ssid,{interface,timeout})`：
+  - `connectSaved(ssid)`（轮询切换 WiFi 的主路径，`scripts/worker.js` 即调它）：`netsh wlan connect` 轮询 8s 未连上且 profile 标记为隐藏时，**自动回退到 `wlanConnectDirected` 定向探测连接**。
+  - `connect(ssid,password,{hidden:true})`（面板「添加隐藏 WiFi」路径）：隐藏分支改用 `wlanConnectDirected`，可见网仍走 `netsh wlan connect`（行为不变）。
+- **生产可用性**：`wlanconnect.ps1` 仅依赖 Windows 自带的 PowerShell + `wlanapi.dll`，无第三方运行时依赖；脚本内自带环境变量精简，在本机（WorkBuddy 注入 364KB 环境）与干净用户机器上均能跑通（已实测 `OK: connected to ROSNET2`）。
+- **更正 v0.3.53 的「WLAN AutoConfig 卡死」假设**：该假设不成立——WLAN 接口本身健康、可见网可连、密码经 v0.3.53 重建已正确、覆盖 94%；真正卡住的是 netsh 的定向探测缺失，而非服务状态机。无需管理员重启 `wlansvc`。
+
+## [0.3.53] — 2026-08-03
+
+### Fixed（隐藏 WiFi「添加并连接」：候选安全类型只试了第一个）
+
+- **根因（真 bug）**：`connect(ssid, password, {hidden:true})` 对隐藏网按 `hiddenCandidates` 生成多个候选安全类型（WPA2/AES、WPA3/AES、WPA2/TKIP、WPAPSK/TKIP、WPAPSK/AES），但循环里**第一个候选 `add profile` 成功后 profile 已存在，后续候选的 `add` 因「已存在」冲突被吞、从未真正尝试**。结果非 WPA2 的隐藏网（如实际是 WPA3/TKIP 的 ROSNET）永远连不上，且 `connectSaved`/轮询路径只读已存 profile，同样受困。
+- **修复**：隐藏网分支在尝试每个候选前先 `delete profile name="<ssid>"`，确保每种安全类型都被真试、第一个连上的写进 profile。可见网分支不受影响（保留原 profile）。
+- **配套处置（密码重建）**：Master 确认所有 ROSNET 密码统一为 `12345678`。已用一次性脚本对所有 ROSNET 先 `delete` 旧（v0.3.49 重导破坏的）profile，再用 `connect(ssid,'12345678',{hidden:true})` 重建——profile 经核验为明文密钥 + 正确安全类型 + `nonBroadcast` 保留（`add` 成功）。密码层已恢复正确。
+- **当前遗留（WLAN 栈状态机）**：重建后 `netsh wlan connect` 仍报 `not available to connect`，但同一台机器**能正常扫到 13 个可见网、能连可见网**（WLAN 硬件/驱动/AutoConfig 本身健康），且 v0.3.49 轮曾连上 ROSNET1/2/5/9。指向 WLAN AutoConfig 对**隐藏网的 directed-probe 状态机可能被反复 delete+connect 操作卡住**，需**以管理员重启 WLAN AutoConfig 服务**（`Restart-Service wlansvc -Force`）或禁用/启用 WLAN 接口后恢复，与代码/密码无关。待 Master 在管理员终端执行后复测。
+
+## [0.3.52] — 2026-08-03
+
+### Fixed（隐藏 WiFi 标记破坏密码：markProfileHidden 改用 set profileparameter）
+
+- **根因（真 bug，致命）**：v0.3.49 的 `markProfileHidden(ssid)` 用「`export profile key=clear` → 改写 `nonBroadcast` → `add profile` 重新导入」的方式改隐藏标记。但本机**禁止 `key=clear` 明文导出密钥**（系统策略），导出的 `keyMaterial` 是 DPAPI 加密 blob 而非明文；重新 `add profile` 时该 blob 被重导，密码随之中断损坏。结果：profile 看着完好（`nonBroadcast` 在、`keyMaterial` 有值），实则密码不可用 → ROSNET 连接时认证失败（ROSNET1「连上又断」、ROSNET2 直接「无法用于连接」）。
+- **修复**：`markProfileHidden` 改用 Windows 原生 `netsh wlan set profileparameter name="<ssid>" nonBroadcast=yes|no`（已确认该命令支持 `nonBroadcast` 参数）。**只改这一个标记，不导出、不重导、完全不碰密码** → 从根上消除密码损坏。已存 profile 的密码/安全类型原样保留，连接能力不受影响。
+- **更正 v0.3.51 的错误归因**：v0.3.51 把 ROSNET2 写成「WPA1/TKIP 隐藏网」，但实测其 profile XML 实为 **`WPAPSK/AES`（WPA2-Personal）**，`getProfileInfo` 把「WPA - 个人」误读成 WPA1/TKIP。v0.3.51 的 `hiddenCandidates` 补全 TKIP 方向**无害（防御性），但「ROSNET2 因 TKIP 连不上」的具体归因不成立——真因是 v0.3.49 重导破坏了密码。
+- **物理层确认覆盖正常**：`netsh wlan show networks mode=bssid` 显示机器旁有 **91–94% 信号的隐藏网 BSSID**（SSID 字段为空，正是隐藏网），覆盖毫无问题（用户「电脑就在路由器旁、手机能连」反馈正确）。ROSNET2 设成非隐藏后仍「无法用于连接」，排除 `nonBroadcast` 标记本身的问题，锁定密码不可用。
+- **待 Master 处置（恢复密码）**：21 个 ROSNET 的密码可能已被 v0.3.49 重导破坏，需重新输入密码才能恢复连接。方法二选一：① 面板「添加隐藏 WiFi」逐个输入 ROSNET 名+正确密码重新添加（v0.3.51 的 connect 隐藏分支会用正确安全类型重建 profile）；② Windows 原生连一次 ROSNET 输入密码重建 profile。修复后的 `markProfileHidden` 重新标记**不再破坏密码**。
+- 全量单测无回归（markProfileHidden 路径无既有单测，已确认不依赖旧「导出重导」行为）。
+
+## [0.3.51] — 2026-08-03
+
+### Fixed（隐藏 WiFi「添加并连接」：WPA1/TKIP 隐藏网连不上）
+
+- **根因（真 bug，与 WiFi 是否在范围无关）**：用户反馈「点击添加隐藏 WiFi，ROSNET1 正常、其余全报错」。核查 21 个 ROSNET 的真实安全类型：ROSNET1 是 `WPA3-Personal`（命中候选 `WPA3SAE/AES` 侥幸连上），而 `ROSNET2/3/4/5/10/11/12` 是 **`WPA-Personal`（WPA1，加密 TKIP 而非 AES）**。`core/wifiManager.js` 的 `connect()` 对隐藏网硬编码的猜测列表只试了 `WPAPSK/AES`，AES 与 TKIP 不匹配 → 这批 WPA1 隐藏网全部连接失败。这些 ROSNET 本机都已有真实 profile（v0.3.49 已标 `nonBroadcast`），`connect` 却弃之不用、去猜安全类型反而猜错——这正是「只有 ROSNET1（WPA3）成功、其余全报错」的成因。
+- `core/wifiManager.js`：
+  - 新增 `hiddenCandidates(password)`：隐藏网候选安全类型列表，**补全 TKIP 组合**（`WPA2/AES`、`WPA3/AES`、`WPA2/TKIP`、`WPAPSK/TKIP`、`WPAPSK/AES`），旧实现缺 `WPAPSK/TKIP` 导致 WPA1 隐藏网连不上。
+  - `connect()` 的 hidden 分支：已存 profile 且用户未手输密码时直接 `connectSaved` 直连（系统掌握完整安全类型，最可靠）；否则用 `hiddenCandidates` 含 TKIP 的列表逐个尝试。注意不能单靠「已存 profile 的安全类型」——netsh 的 profile 只报 `WPA - 个人` 不含 TKIP 细节，`normalizeSecurity` 默认 AES 仍会连不上 TKIP 网，故必须显式试 TKIP。
+  - 轮询路径（`connectSaved`）读真实 profile、不猜安全类型，故**不受此 bug 影响**（v0.3.49 实测 ROSNET1/2/5/9 轮询能连即佐证）。
+- `test/wifiManager.test.js`：新增 `hiddenCandidates` 回归用例（有密码时候选必须含 `WPAPSK/TKIP`、无密码仅开放网络）。
+- **澄清 v0.3.50 的「非代码问题」归因遗漏**：v0.3.50 当时「这台 Windows 机器连不上 ROSNET」是物理事实（确收不到信号），但泛化为「ROSNET 不可达/代码无关」不准确——WPA1/TKIP 连接 bug 与位置无关、真实存在；用户手机能连 ROSNET 也证明网络本身正常（仅隐藏 SSID）。**端到端验证需在 ROSNET 覆盖区内复测**。
+- 全量单测 **325 项（324 通过 / 1 skip）**，无回归。
+
+---
+
+## [0.3.50] — 2026-08-03
+
+### Fixed（统计报告显示：百分比 ×100 多算 + 耗时纯秒）
+
+- **百分比显示 bug**：`public/js/history.js` 的 `fmtSummaryVal()` 对含 `rate` 的字段（完成率 `completionRate`、命中率 `foundRate`）又做了一次 `×100`，但后端 `core/taskStats.js` 早已存 **0–100 整数百分比**（如 50 表示 50%）。导致历史详情页百度/谷歌卡片的完成率、命中率显示成几千%（如 100% 显示成 10000%）。改为直接显示（不再 ×100）。
+- **耗时显示优化**：`history.js` 与 `taskStats.js` 的 `fmtDur()` 此前只输出纯秒（如 `3120s`）或英文 `m+s`，长任务不直观。统一改为中文「X时Y分Z秒」（<1分钟「Y分Z秒」、<1秒「Nms」）。总耗时 2671341ms → 44分31秒。
+- **说明（最新任务 WiFi 切换报错非代码回归）**：用户反馈「最新任务 WiFi 切换都报错」指向 `02eb528c`（08-03 06:50 提交，百度+谷歌）。核查 `task_run_log`：百度阶段 21 个 ROSNET 轮询，仅 ROSNET2/9 连上、19 个「切换失败：信号弱或凭证失效」被 skip（完成率 10%）——但这是**提交在我下午把 21 个 ROSNET 标 `<nonBroadcast>true</nonBroadcast>` 之前**的历史任务，当时 ROSNET 未标隐藏故连不上。当前 ROSNET profile 已验证全部含 `<nonBroadcast>true</nonBroadcast>` 且密码在；真机实测 WLAN 网卡正常（扫到 15 个可见网、连 HUAWEI-805 秒连成功），21 个 ROSNET 当前连不上是**路由器不可达（机器不在其信号范围）**，非代码问题（`connectSaved` 逻辑 v0.3.49 未改动）。机器回到 ROSNET 覆盖区后新任务即可正常轮询。
+- 全量单测 323 项（322 通过 / 1 skip），无回归。
+
+---
+
+## [0.3.49] — 2026-08-03
+
+### Fixed（隐藏 WiFi 轮询：以系统 nonBroadcast 标记为权威判据）
+
+- **背景（推翻 v0.3.48 前提）**：用户确认 20 个 `ROSNET1–20`(+`ROSNET60`) 不是「搬离旧网络/不在信号范围」，而是**隐藏了 SSID（不广播）**——它们从不出现在扫描结果里，但凭 Windows 已存 profile 即可连接。v0.3.48 把它们当「历史残留、扫不到就剔除」是误判，导致这 20 个隐藏网无法纳入轮询。根因：profile 缺 `<nonBroadcast>true</nonBroadcast>` 标记，Windows 只在「扫描到广播」时才尝试连接，隐藏网永远连不上（表现为 `connect` 后「信号弱或凭证失效」）。
+- `scripts/worker.js` 的 `buildWifiSeq()`：把 v0.3.48 的「**仅前端 `config.hiddenWifis` 白名单豁免可见性**」改为**以 Windows profile 的 `nonBroadcast` 系统标记为准**（优先）+ 前端白名单补充。即：本机 profile 标了 `<nonBroadcast>true</nonBroadcast>` 的 SSID，即使当前扫描不到，也自动纳入轮询；不再依赖浏览器 localStorage 白名单（换浏览器/清缓存标记也不丢）。
+- `core/wifiManager.js`：
+  - 新增 `getProfileInfo(ssid)`（返回 `{ssid,hidden,auth}`，无效 profile 返回 null）、`listSavedProfilesDetailed()`（返回 `[{ssid,hidden,visible,auth}]`）、`markProfileHidden(ssid, hidden=true)`（导出 profile `key=clear` → 改写/插入 `nonBroadcast` → 重新 `add`，失败回退 `user=all`，保留原密码），以及 `HIDDEN_MARK_RE` 常量。
+  - `buildProfileXml` 支持 `opts.nonBroadcast` 并写出 `<nonBroadcast>true</nonBroadcast>`；`connect()` 生成 profile 时按隐藏网传入 `nonBroadcast`。
+  - `getConnectableNetworks` 兜底：扫描不到但本机 profile 标了 nonBroadcast 的 SSID 仍保留。
+- `routes/wifiRoutes.js`：新增 `GET /api/wifi/saved`（调用 `listSavedProfilesDetailed`，按 SSID 排序返回）、`POST /api/wifi/mark-hidden`（批量标记，逐个返回结果并汇总 ok/failed 计数）。
+- `public/index.html` + `public/js/wifi.js` + `public/css/style.css`：新增「本机已存 WiFi（隐藏网络修复）」面板——扫描本机 profile、勾选标记隐藏并纳入轮询、标记成功后写入前端白名单；标签区分「可见/扫不到/隐藏已标记/已纳入轮询」。
+- **真机验证**：ROSNET1 经 `markProfileHidden` 标记成功（`hidden:false→true`），实测连上（91% 信号、433Mbps）；经 `/api/wifi/mark-hidden` 批量修复 `ROSNET2–20 + ROSNET60` 共 20 个全部成功；轮询同款 `connectSaved` 实测 ROSNET9/ROSNET5/ROSNET2 各 ~2.4s 连上（此前 11s 失败）。
+- 单测：新增用例 #14（v0.3.49）——mock `listSavedProfilesDetailed` 返回 `ROSNET9 hidden=true` / `OLD_CAFE hidden=false`，验证仅凭系统标记即纳入 ROSNET9、剔除 OLD_CAFE（无需 `hiddenWifis`）。全量单测 **323 项（322 通过 / 1 skip）**，无回归。
+
+---
+
+## [0.3.48] — 2026-08-03
+
+### Fixed（WIFI 轮询「假死」根治：可见性豁免范围收窄）
+
+- **背景**：任务 `cfdca417` 百度阶段连续出现 20 条「切换『ROSNETn』失败：信号弱或凭证失效」，每条间隔约 11 秒、持续近 4 分钟，界面看起来像卡死（实际任务全程无 ≥45s 停顿、52 分钟正常跑完）。根因是本机残留了 20 个换地点后再也扫不到的旧网络 profile（ROSNET1–20），它们仍留在面板「已存」集合里，每轮都被挨个尝试切换并失败。
+- `scripts/worker.js` 的 `buildWifiSeq()`：把 v0.3.46 引入的「**已存 Windows profile 即豁免可见性**」收窄为「**仅 `config.hiddenWifis` 白名单内的 SSID 才豁免**」。隐藏网络（不广播 SSID、扫描永远不可见）仍能进入轮询；而「有 profile 但扫不到」的历史残留网络恢复被过滤，不再拖慢任务、刷屏日志。
+- `core/taskConfig.js`：新增 `hiddenWifis` 配置字段（数组，默认 `[]`），随任务配置透传至 worker（谷歌阶段 `gConfig` 经 `Object.assign` 自动继承）。
+- `public/js/wifi.js`：新增隐藏网络白名单存储 `autoclaw_wifi_hidden_v1`——「添加隐藏 WiFi」连接成功时写入，点「忘记」时同步移除；「已记住的 WiFi」列表中隐藏网络额外显示「隐藏」标签以便区分。
+- `public/js/config.js`：提交任务时透传 `hiddenWifis`。
+- 新增单测 2 项（`test/wifiPoll.test.js`）：白名单内不可见 SSID 应保留进轮询；非白名单的不可见 SSID 即使本机有 profile 也应被剔除（回归防护）。全量单测 322 项通过。
+
+---
+
+## [0.3.47] — 2026-08-03
+
+### Fixed（v0.3.46「添加隐藏 WiFi」回归修复）
+
+- `routes/wifiRoutes.js`：隐藏/可见 WiFi 连接失败不再返回 **HTTP 500**（密码错误、信号弱、系统不支持该安全类型等均属客户端/业务错误），统一返回 **HTTP 200 + `code:ERR_WIFI_CONNECT_FAILED`**（前端本就只判 `data.code`，语义更正，并消除浏览器控制台红 5xx）。
+- `core/wifiManager.js` 的 `connect()`：对每个安全类型候选（WPA2/WPA3/WPA）包 `try/catch`——若本机不支持某类型（如旧系统无 WPA3SAE 导致 `netsh add profile` 报错）不再抛异常，而是记录诊断并继续尝试下一个候选，最终返回干净错误而非 500；失败文案也更准确（区分「密码错/信号弱」与「本机不支持该安全类型」）。
+- `public/js/config.js`：**修复既有 BUG**（非 v0.3.46 引入）——`loadHistory()` 与 `tokenHeaders()` 引用的 `token` 变量顶层未初始化（有效 token 仅 `submitTask` 局部可见），导致打开页面时 `/api/task/history`、`/api/client/list` 请求不带有效令牌 → **401**，用户看不到任务历史/客户列表。新增统一 `getToken()`（localStorage 优先、缺省 `autoclaw-dev`，与 `wifi.js` 同语义）并在两处使用。
+
+---
+
+## [0.3.46] — 2026-08-02
+
+### Added（WiFi 切换面板：添加隐藏 WiFi）
+
+**需求**：WiFi 切换面板原本只列出「可见」网络（扫描得到的 SSID），不广播 SSID 的隐藏网络无法加入，导致既连不上、也不能纳入 WIFI 轮询。
+
+**新增**：
+- `core/wifiManager.js` 的 `connect(ssid, password, { hidden })`：当 `hidden:true` 且 SSID 未出现在扫描中时，不再报 `ERR_WIFI_NOT_FOUND`，而是按个人网常见安全类型依次尝试直连（有密码→`WPA2PSK`→`WPA3SAE`→`WPAPSK`；无密码→`open`），首个连上即成功。可见网络路径行为不变。
+- `routes/wifiRoutes.js`：`POST /api/wifi/connect` 透传 `body.hidden` 给 `connect`。
+- `public/index.html` + `public/js/wifi.js`：WiFi 切换面板新增「添加隐藏 WiFi」表单（SSID + 密码 +「添加并连接」）。成功后自动 `savePw` 记住密码，并渲染「已记住的 WiFi（含隐藏）」芯片列表，可逐条「忘记」。
+- `scripts/worker.js` 的 `buildWifiSeq()`：对已存（remembered）集合放宽可见性过滤——`可见` 或 `本机已存凭证（Windows profile）` 的 SSID 都保留进轮询序列。隐藏网络不广播 SSID，但 `connectSaved` 按 profile 名即可直连，故隐藏 WiFi 现在也能被轮询（兼容无 `listSavedProfiles` 的测试桩，旧测试不回归）。
+
+**注意**：隐藏网络无法自动判定安全类型，故采用「逐个尝试」策略；若路由器仅开放 WPA3 企业/802.1X 等不支持类型仍会失败（与可见网络一致）。
+
+---
+
+## [0.3.45] — 2026-08-01
+
+### Fixed（运行看门狗 + 僵尸任务清理，根治「任务卡死无人管」）
+
+**问题**：线上任务 `702793db` 卡死约 13 小时——worker 子进程内部某步无限 await（根因：浏览器 `launch()` 无超时兜底，Chrome 进程挂起时永久等待；且 `close()` 虽已有 10s race 兜底，仍有其它 await 可能挂起）。而 `taskManager` 仅 `stop()` 时有强杀兜底，**完全没有运行中 worker 的卡死检测**，导致 `activeTaskId` 永不释放、`status` 永远 RUNNING，且重启也不清 DB 里残留的 `pending/running`。
+
+**修复**：
+- `core/taskManager.js` 新增**运行看门狗**：`startWatchdog()` 每 30s 巡检，记录每个活跃任务最后收到 worker 消息的时间（`_lastMsgAt` 心跳）；若超过 `AUTOCLAW_WATCHDOG_MS`（默认 600000=10 分钟）无任何进展，则强杀 worker（Windows 下 `taskkill /T /F` 连 Chrome 子树一起清理，避免孤儿占 profile 锁）、标记 `FAILED`、释放活跃槽位、推送超时告警。
+- 新增 `reapZombieTasks()`：进程启动（taskManager.init 后）扫描 DB 中 `status IN ('pending','running')` 且无内存 worker 的任务（上次进程残留），统一标记 `FAILED`，避免历史列表误导。
+- `core/taskEngine.js`：`run()` 与 `_relaunch()` 的 `session.launch()` 用现有 `withTimeout` 包裹（默认 90s / 沿用 `actionTimeoutMs`），浏览器启动挂起时抛错走 catch→FAILED 而非永久等。（`close()` 已有 10s race，未动。）
+- `app.js`：启动即 `taskManager.reapZombieTasks()` + `taskManager.startWatchdog()`。
+- 测试 `test/taskManagerWatchdog.test.js`：4 项（超时强杀+标记+释放槽位、心跳新鲜不误杀、已结束任务不处理、僵尸清理 UPDATE）。
+
+---
+
+## [0.3.44] — 2026-08-01
+
+### Added（批量定时任务 campaign）
+
+**目标**：支持把多个网站编成一个批量任务，按每日固定时间或每隔 N 小时自动依次跑完，可选每轮打乱顺序；契合「单活跃任务」限制，每轮各站串行全跑。
+
+- 新增 `campaigns` 表（`scripts/schema.sqlite.sql` / `scripts/schema.sql`，sqlite 下次打开自动补齐）。
+- `core/scheduler.js`：调度器单例，30s 巡检；到点且当前无活跃任务时启动 campaign 运行，按（可选打乱的）顺序把各 target 串行提交为普通 task；单站成功/失败均推进、全部跑完排下一次；支持 `daily` 与 `interval` 两种调度；run_state 持久化、重启清理残留运行态、手动 `trigger` 立即跑一轮；socket 推送实时进度。
+- `routes/schedulerRoutes.js` + `app.js`：挂载 `/api/campaign/*`（list/create/update/delete/enable/trigger/state），启动即 `scheduler.start()`。
+- 前端 `public/campaigns.html` + `public/js/campaigns.js`：管理页（列表 / 新建编辑 / 启用 / 触发 / 删除 / 实时进度），含「一键预填公司 10 站」。
+- `scripts/seed-company-campaign.js`：一键创建/更新「公司全站每日巡检」（10 站、daily 09:00、打乱、百度+谷歌）。
+- 测试 `test/scheduler.test.js`：10 项全绿（打乱覆盖、到点判定、串行推进、失败不阻塞、trigger、重启清理）。
+
+### Changed（站点级独立配置 + 增删改查 + 本轮参与开关）
+
+**目标**：网站数不止 10 个，需支持增删改查；每个站点可单独配置是否参与本轮（默认勾选）、单独配置该站自己的流程（平台、关键词、标题词、锚点、WIFI 轮询、扫描页数、拟人参数），与单流程配置页一致。
+
+- `core/scheduler.js`：`normalizeCampaignSpec` 为每个站点补 `id`、`enabled`（默认 `true`）；`_beginRun` 只把 `enabled !== false` 的站点纳入本轮顺序；`_buildTargetConfig` 用**每站自己的** `platforms` / `pollWifi` / `browseAnchor` / `maxResultPages` / `anthropic` / `humanize` / `rememberedWifis`（缺省回落 campaign 级默认）；进度 `total` 按启用站数计。
+- `routes/schedulerRoutes.js`：create/update 对每站字段（`enabled` / `platforms` / `browseAnchor` / `pollWifi` / `maxResultPages` / 拟人参数等）透明透传校验。
+- 前端站点编辑器：用动态站点列表替换原 JSON 文本框。每行支持：启用勾选（默认勾）、名称、域名、平台（百度/谷歌复选）、关键词、标题词、锚点、WIFI 轮询、扫描页数、高级拟人参数折叠区；支持新增 / 删除 / 编辑、「一键预填公司 10 站」、「应用全站默认到所有站点」；进度按启用站数显示。
+- `scripts/seed-company-campaign.js`：10 站每站带 `platforms:['baidu','google']`、`enabled:true`、`browseAnchor:'关于我们'`。
+- 测试 `test/scheduler.test.js`：增至 12 项（新增「禁用站点被跳过、仍跑完启用站且下次排程」、「每站单独平台（如仅百度）生效」）。
+
+---
+
 ## [0.3.43] — 2026-07-30
 
 ### Changed（浏览器无头模式可配置，支持服务器部署）

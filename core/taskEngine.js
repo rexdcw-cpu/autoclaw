@@ -72,9 +72,16 @@ const HUMAN_DETAIL = {
   hover: '悬停/按键',
   idle: '随机停顿',
   failed: '随机停顿（动作跳过）',
+  timeout: '随机停顿（动作超时跳过）',
   disabled: '已禁用',
   noop: '跳过',
 };
+
+// 拟人微动作总超时：_humanInterstitial 内的 Playwright 微动作（hover/$$/mouse.*）在页面
+// 处于异常状态（导航中、JS dialog、context 销毁）时可能 pending 永不 resolve，且内部 try/catch
+// 只挡 rejection 挡不住 hang。若不包超时，整个 round 会永久卡在步骤之间，只能靠看门狗 10min 强杀。
+// 该值需明显大于正常 thinkMs（≤3s）+ 微动作耗时（通常 <2s），15s 足够宽松不会误杀。
+const HUMAN_INTERSTITIAL_TIMEOUT_MS = 15000;
 
 class TaskEngine {
   /**
@@ -114,6 +121,11 @@ class TaskEngine {
     this.shouldStop = false;
     // 熔断标志（失败率超阈值）
     this.circuitPaused = false;
+    // 引擎级熔断开关：默认开启（兼容旧版「整任务多轮」调用）；
+    // 分阶段「按节点轮询」时由 worker 注入 disableCircuitBreak:true 关闭——
+    // 每个引擎只跑单轮，单轮失败=100% 会误触发「任务已熔断终止」告警，
+    // 且节点失败本就由 worker 负责重试/补跑，引擎不应自行熔断。
+    this.circuitBreakEnabled = true;
 
     // VPN 状态（切入谷歌时变更）
     this._usingVpn = false; // 当前浏览器是否带代理启动
@@ -192,19 +204,29 @@ class TaskEngine {
    */
   async run(roundsOverride, opts) {
     opts = opts || {};
-    // 本次运行的轮次（克隆并修正 totalRounds，使进度显示与分阶段一致）
+    // 本次运行的轮次（克隆并归一化 roundIndex / totalRounds，使进度显示与分阶段一致）。
+    // normalizeRounds 把子数组内的 roundIndex 重新编号为 0-based，避免谷歌原始全局
+    // roundIndex 3/4/5 保留下来、进度显示成「3/3、4/3、5/3」。
     const baseRounds = (roundsOverride && roundsOverride.length)
       ? roundsOverride
       : (this.config.rounds || []);
-    this._rounds = baseRounds.map((r) => Object.assign({}, r, { totalRounds: baseRounds.length }));
+    this._rounds = P.normalizeRounds(baseRounds);
     this._vpnPreset = opts.vpnPreset || this._vpnPreset || null;
+    // 分阶段「按节点轮询」时 worker 注入 disableCircuitBreak:true，关闭引擎级熔断
+    // （单轮失败交由 worker 重试/补跑，不在此误报「任务已熔断终止」）。
+    this.circuitBreakEnabled = !opts.disableCircuitBreak;
 
     const session = new BrowserSession();
     this.session = session; // 必须挂到 this，供 _relaunch 重拉浏览器时使用
     let finalStatus = TaskStatus.COMPLETED;
     try {
       const initialProxy = this._initialProxyFor();
-      await session.launch(initialProxy, this._googleProfileDir ? { userDataDir: this._googleProfileDir } : undefined);
+      // 浏览器启动加超时兜底：Chrome 进程挂起(如僵尸锁/资源耗尽)时抛错走 catch→FAILED，避免永久卡
+      const launchMs = Math.max(60000, (this.config.strategy && this.config.strategy.actionTimeoutMs) || 90000);
+      await withTimeout(
+        session.launch(initialProxy, this._googleProfileDir ? { userDataDir: this._googleProfileDir } : undefined),
+        launchMs,
+      );
       this.ctx = await session.newContext();
       this._usingVpn = !!(initialProxy && initialProxy.httpProxy);
     } catch (e) {
@@ -252,9 +274,14 @@ class TaskEngine {
     }
 
     // 终态推导优先级：熔断 > 停止 > 暂停 > 完成
+    // 说明：旧实现终态仅由 circuitPaused 决定，导致「单轮失败」必须靠熔断才能判 FAILED，
+    // 而分阶段按节点引擎已关闭熔断（circuitBreakEnabled=false），单轮失败会误判为 COMPLETED。
+    // 故在熔断开关关闭时，用 failCount 直接判定该节点成败（failCount>0 → FAILED），
+    // 交由 worker 重试/补跑；熔断开关开启（旧版整任务多轮）保持原语义。
     if (this.circuitPaused) finalStatus = TaskStatus.FAILED;
     else if (this.shouldStop) finalStatus = TaskStatus.STOPPED;
     else if (this.shouldPause) finalStatus = TaskStatus.PAUSED;
+    else if (!this.circuitBreakEnabled && this.failCount > 0) finalStatus = TaskStatus.FAILED;
     else finalStatus = TaskStatus.COMPLETED;
 
     this.emit(
@@ -286,7 +313,11 @@ class TaskEngine {
     } catch (e) {
       /* 关闭失败不阻塞，下面 launch 会兜底 */
     }
-    await this.session.launch(proxy, this._googleProfileDir ? { userDataDir: this._googleProfileDir } : undefined);
+    const launchMs = Math.max(60000, (this.config.strategy && this.config.strategy.actionTimeoutMs) || 90000);
+    await withTimeout(
+      this.session.launch(proxy, this._googleProfileDir ? { userDataDir: this._googleProfileDir } : undefined),
+      launchMs,
+    );
     this.ctx = await this.session.newContext();
     this._usingVpn = !!(proxy && proxy.httpProxy);
   }
@@ -699,7 +730,16 @@ class TaskEngine {
     const anchor = ((this.config.target && this.config.target.browseAnchor) || '关于我们').trim() || '关于我们';
     const contactHref = await this._findContactLink(page);
     if (contactHref) {
-      await page.goto(contactHref, { waitUntil: 'domcontentloaded', timeout: this.config.strategy.actionTimeoutMs });
+      // 联系人/关于子页加载单独设较短超时（上限 20s）：避免站内页慢/不可达时整个 BROWSE
+      // 软步骤卡满全局 actionTimeoutMs（谷歌 60s），造成「任务卡死」假象；且 BROWSE 是软步骤，
+      // 超时只记日志、节点仍判成功，会让报告「100% 完成」却实际没做站内浏览。
+      // 导航失败不阻塞：仍滚动当前页，尽量保留浏览价值。
+      const navTimeout = Math.min(this.config.strategy.actionTimeoutMs || 60000, 20000);
+      try {
+        await page.goto(contactHref, { waitUntil: 'domcontentloaded', timeout: navTimeout });
+      } catch (e) {
+        /* 联系人页加载慢/不可达：忽略，继续滚动当前页 */
+      }
     }
     await this._doScroll(page);
     if (!contactHref) {
@@ -788,7 +828,13 @@ class TaskEngine {
   async _betweenSteps(page, round, taskId) {
     const h = this.config.humanize || {};
     if (h.enabled === false) return;
-    const hu = await this._humanInterstitial(page);
+    let hu;
+    try {
+      // 拟人微动作整体包超时：防止内部 Playwright 微动作 pending 挂死导致 round 永久卡住。
+      hu = await withTimeout(this._humanInterstitial(page), HUMAN_INTERSTITIAL_TIMEOUT_MS);
+    } catch (e) {
+      hu = { thinkMs: 0, action: 'timeout' };
+    }
     const detail = HUMAN_DETAIL[hu.action] || hu.action;
     this.emit(
       P.makeProgress({
@@ -908,6 +954,8 @@ class TaskEngine {
 
   /** 失败率超阈值 → 熔断：推送 alert 并置熔断标志（决策 A4） */
   _maybeCircuitBreak() {
+    // 分阶段按节点引擎：失败由 worker 重试/补跑，引擎不自行熔断（避免单轮失败=100% 误报）。
+    if (!this.circuitBreakEnabled) return;
     const stats = this._makeStats();
     if (stats.failRate > this.config.strategy.failRateThreshold) {
       this.circuitPaused = true;

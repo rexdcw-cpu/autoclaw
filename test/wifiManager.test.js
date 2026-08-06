@@ -133,6 +133,24 @@ test('buildProfileXml: 对 SSID/密码做 XML 转义', () => {
   assert.ok(xml.includes('<keyMaterial>p&amp;w&quot;x</keyMaterial>'));
 });
 
+test('hiddenCandidates: 有密码 → 候选必须含 WPAPSK/TKIP（修复 WPA1 隐藏网连不上）', () => {
+  // ROSNET2~5/10~12 是 WPA-Personal（WPA1/TKIP）。旧实现只猜 WPAPSK/AES，缺 TKIP → 连不上。
+  const c = wifi.hiddenCandidates('pw');
+  assert.ok(
+    c.some((x) => x.authentication === 'WPAPSK' && x.encryption === 'TKIP'),
+    '候选列表应含 WPA1/TKIP，否则 WPA1 隐藏网连不上',
+  );
+  // 顺序：WPA2/AES、WPA3/AES 优先，再补 TKIP 组合兜底
+  assert.deepStrictEqual(c[0], { authentication: 'WPA2PSK', encryption: 'AES' });
+  assert.deepStrictEqual(c[3], { authentication: 'WPAPSK', encryption: 'TKIP' });
+});
+
+test('hiddenCandidates: 无密码 → 仅开放网络', () => {
+  assert.deepStrictEqual(wifi.hiddenCandidates(''), [
+    { authentication: 'open', encryption: 'none' },
+  ]);
+});
+
 test('parseLocalIp: 取活跃出口 IP（WLAN 被桥接场景）', () => {
   // 网桥 metric 25 < 以太网 metric 35 → 应返回网桥的 192.168.1.187
   const out = [

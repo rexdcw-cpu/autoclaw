@@ -70,3 +70,31 @@ CREATE TABLE IF NOT EXISTS task_run_log (
 CREATE INDEX IF NOT EXISTS idx_task_run_log_task_id ON task_run_log (task_id);
 CREATE INDEX IF NOT EXISTS idx_task_run_log_task_round ON task_run_log (task_id, round);
 CREATE INDEX IF NOT EXISTS idx_task_run_log_task_ts ON task_run_log (task_id, timestamp);
+
+-- 批量定时任务（campaign）：一组网站目标 + 调度 + 打乱开关。
+-- 一个 campaign 每次运行按（可选打乱的）顺序把各目标串行提交为普通 task。
+-- 时间字段以 epoch 毫秒（TEXT 数字串）存储，便于调度器直接比较、规避时区问题。
+CREATE TABLE IF NOT EXISTS campaigns (
+  id                TEXT    NOT NULL,
+  name              TEXT    NOT NULL,
+  schedule_type     TEXT    NOT NULL DEFAULT 'daily',
+  schedule_hour     INTEGER NULL,
+  schedule_minute   INTEGER NULL,
+  interval_hours    INTEGER NULL,
+  enabled           INTEGER NOT NULL DEFAULT 1,
+  shuffle           INTEGER NOT NULL DEFAULT 1,
+  platforms         TEXT    NOT NULL,
+  poll_wifi         INTEGER NOT NULL DEFAULT 0,
+  remembered_wifis  TEXT    NULL,
+  targets           TEXT    NOT NULL,
+  run_state         TEXT    NULL,
+  last_run_at       TEXT    NULL,
+  last_run_status   TEXT    NULL,
+  next_run_at       TEXT    NULL,
+  created_at        TEXT    NOT NULL,
+  updated_at        TEXT    NULL,
+  PRIMARY KEY (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaigns_next ON campaigns (next_run_at);
+CREATE INDEX IF NOT EXISTS idx_campaigns_enabled ON campaigns (enabled);

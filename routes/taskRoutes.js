@@ -125,6 +125,35 @@ router.get('/history', async (req, res) => {
   }
 });
 
+// GET /api/task/history-all —— 列「全部执行过的任务」（DB 台账 ∪ 未入库 JSON，去重）
+// 用于历史列表页；继承 A3 鉴权。
+router.get('/history-all', async (req, res) => {
+  try {
+    const list = await db.getHistoryAll(Number(req.query.limit) || 500);
+    return res.json({ code: 0, data: { list: list }, message: 'ok' });
+  } catch (e) {
+    return fail(res, 500, ERR.ERR_DB_QUERY, '查询历史任务失败');
+  }
+});
+
+// GET /api/task/detail?taskId= —— 单任务执行详情（config + 完成度摘要 + 报告 + 运行时间线）
+// 用于历史详情视图；继承 A3 鉴权。
+router.get('/detail', async (req, res) => {
+  const taskId = req.query.taskId;
+  if (!taskId) {
+    return fail(res, 400, ERR.ERR_TASK_NOT_FOUND, '缺少 taskId');
+  }
+  try {
+    const detail = await db.getTaskDetail(String(taskId));
+    if (!detail) {
+      return fail(res, 404, ERR.ERR_TASK_NOT_FOUND, '任务不存在');
+    }
+    return res.json({ code: 0, data: detail, message: 'ok' });
+  } catch (e) {
+    return fail(res, 500, ERR.ERR_DB_QUERY, '查询任务详情失败');
+  }
+});
+
 // GET /api/task/logs —— 回看某任务运行记录（F-25）
 router.get('/logs', async (req, res) => {
   const taskId = req.query.taskId;

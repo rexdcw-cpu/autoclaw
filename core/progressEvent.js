@@ -165,6 +165,26 @@ function makeStats(totalRounds, currentRound, successCount, failCount) {
 }
 
 /**
+ * 归一化轮次索引：克隆 baseRounds，把 roundIndex 重新编号为子数组内的 0-based 序号、
+ * totalRounds 设为子数组长度，返回新数组（不改原数组）。
+ *
+ * 用途：分阶段按节点/按 WIFI 轮询时，每个节点/网络只跑属于自己的那几个关键词轮次
+ * （googleRounds 等子数组）。若直接沿用 buildRounds 给的全局 roundIndex，百度排第一会
+ * 占 0/1/2，谷歌原始 roundIndex 就是 3/4/5；只把 totalRounds 改成子数组长度(3)而保留
+ * 原 roundIndex，进度会显示成「3/3、4/3、5/3」（roundIndex>totalRounds）误导。
+ * 本函数让每个子数组内的 roundIndex 从 0 起算、与 totalRounds 一致。
+ * @param {Array<{roundIndex:number,totalRounds:number,[k:string]:any}>} baseRounds
+ * @returns {Array}
+ */
+function normalizeRounds(baseRounds) {
+  const arr = Array.isArray(baseRounds) ? baseRounds : [];
+  return arr.map((r, i) => Object.assign({}, r, {
+    roundIndex: i,
+    totalRounds: arr.length,
+  }));
+}
+
+/**
  * 构造统一的 ProgressEvent。
  * @param {object} o
  * @param {string} o.taskId
@@ -207,6 +227,7 @@ module.exports = {
   RunMode,
   RoundStatus,
   ERR,
+  normalizeRounds,
   now,
   splitTokens,
   makeStep,

@@ -60,11 +60,13 @@ function newRun(taskId, meta) {
 function fmtDur(ms) {
   if (ms == null) return '-';
   if (ms < 1000) return ms + ' ms';
-  const s = ms / 1000;
-  if (s < 60) return s.toFixed(1) + ' s';
-  const m = Math.floor(s / 60);
-  const rs = Math.round(s % 60);
-  return m + 'm' + (rs ? rs + 's' : '');
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return h + '时' + m + '分' + s + '秒';
+  if (m > 0) return m + '分' + s + '秒';
+  return s + '秒';
 }
 
 /**

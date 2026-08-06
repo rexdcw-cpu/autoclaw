@@ -35,8 +35,87 @@ class TaskManager {
     this.configs = new Map();
     /** 当前活跃任务 id（仅一个） */
     this.activeTaskId = null;
+    /** taskId -> 最后收到该任务 worker 消息的时间戳(ms)，看门狗据此判定卡死 */
+    this._lastMsgAt = new Map();
+    /** 看门狗定时器（unref，不阻止进程退出） */
+    this._watchdogTimer = null;
+    /** 看门狗阈值(ms)，默认 10 分钟；可用 AUTOCLAW_WATCHDOG_MS 覆盖 */
+    this.watchdogMs = Math.max(60000, Number(process.env.AUTOCLAW_WATCHDOG_MS) || 600000);
     /** 日志保留条数 */
     this.maxLog = 500;
+  }
+
+  /**
+   * 在 Windows 上连子树一起强杀（Chrome 是 worker 子进程，否则会变成占用 profile 锁的孤儿）；
+   * 非 Windows 退化为 SIGKILL。
+   */
+  _killWorkerTree(pid) {
+    if (!pid) return;
+    if (process.platform === 'win32') {
+      try {
+        require('child_process').execSync(`taskkill /pid ${pid} /T /F`, { stdio: 'ignore' });
+      } catch (e) {
+        /* 已退出或权限不足，忽略 */
+      }
+    } else {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
+  /**
+   * 启动运行看门狗：定期巡检，若某活跃任务超过 watchdogMs 无任何 worker 消息，
+   * 则强杀其 worker（含 Chrome 子树）、标记 FAILED、释放活跃槽位，避免永久卡死。
+   * 这是「worker 内部某步无限 await」的唯一兜底（taskManager 本身无法感知 worker 内部状态）。
+   */
+  startWatchdog() {
+    if (this._watchdogTimer) return;
+    this._watchdogTimer = setInterval(() => this._watchdogTick(), 30000);
+    if (this._watchdogTimer.unref) this._watchdogTimer.unref();
+  }
+
+  /** 看门狗单次巡检（可被测试直接调用） */
+  _watchdogTick() {
+    const now = Date.now();
+    for (const [taskId, lastAt] of this._lastMsgAt.entries()) {
+      if (now - lastAt <= this.watchdogMs) continue;
+      const st = this.statuses.get(taskId);
+      if (st !== TaskStatus.RUNNING && st !== TaskStatus.PAUSED) continue;
+      const w = this.workers.get(taskId);
+      console.error(`[watchdog] 任务 ${taskId} 超过 ${this.watchdogMs}ms 无心跳，强杀并标记失败`);
+      if (w && w.pid) this._killWorkerTree(w.pid);
+      else if (w) { try { w.kill('SIGKILL'); } catch (e) { /* ignore */ } }
+      this.statuses.set(taskId, TaskStatus.FAILED);
+      db.updateTaskStatus(taskId, TaskStatus.FAILED).catch(() => {});
+      if (this.io) {
+        this.io.to(taskId).emit('task:state', { taskId, status: TaskStatus.FAILED });
+        this.io.to(taskId).emit('alert', {
+          taskId,
+          level: 'error',
+          message: `任务运行超时（超过 ${Math.round(this.watchdogMs / 1000)}s 无进展），已被看门狗强制终止`,
+        });
+      }
+      this._cleanup(taskId);
+    }
+  }
+
+  /**
+   * 进程启动时清理数据库里的僵尸活跃任务：凡 status 为 pending/running 且无内存 worker
+   * 的任务，都是上次进程残留（内存态已丢失），统一标记 FAILED，避免历史列表误导。
+   */
+  async reapZombieTasks() {
+    try {
+      const affected = await db.query(
+        "UPDATE task_config SET status = 'FAILED' WHERE status IN ('pending', 'running')",
+      );
+      const n = (affected && affected.affectedRows) || (affected && affected.changes) || 0;
+      if (n > 0) console.log(`[reap] 已清理 ${n} 个僵尸活跃任务(pending/running)`);
+    } catch (e) {
+      console.error('[reap] 清理僵尸任务失败:', e.message);
+    }
   }
 
   /** 注入 socket.io 实例（app.js 启动时调用一次） */
@@ -75,6 +154,7 @@ class TaskManager {
     this.activeTaskId = taskId;
     this.statuses.set(taskId, TaskStatus.RUNNING);
     this.logs.set(taskId, []);
+    this._lastMsgAt.set(taskId, Date.now());
 
     if (this.io) this.io.to(taskId).emit('task:state', { taskId, status: TaskStatus.RUNNING });
     return { ok: true, taskId, status: TaskStatus.RUNNING };
@@ -93,14 +173,11 @@ class TaskManager {
     const w = this.workers.get(taskId);
     if (w && this._isActive(taskId)) {
       w.send({ type: 'control', action: 'stop' });
-      // 兜底：若 worker 未及时响应，超时强杀
+      // 兜底：若 worker 未及时响应，超时强杀（连 Chrome 子树一起清理）
       setTimeout(() => {
         if (this._isActive(taskId)) {
-          try {
-            w.kill('SIGKILL');
-          } catch (e) {
-            /* ignore */
-          }
+          if (w && w.pid) this._killWorkerTree(w.pid);
+          else if (w) { try { w.kill('SIGKILL'); } catch (e) { /* ignore */ } }
         }
       }, 15000).unref();
     }
@@ -151,6 +228,7 @@ class TaskManager {
 
     // 所有带 event 的消息都作为进度推送并写入日志缓冲
     if (event) {
+      this._lastMsgAt.set(taskId, Date.now()); // 看门狗心跳
       this.latest.set(taskId, event);
       this._pushLog(taskId, event);
       db.bufferRunLog(event); // T-D2：运行记录异步入队（非阻塞，定时器批量落库）
@@ -203,6 +281,7 @@ class TaskManager {
       db.updateTaskStatus(taskId, TaskStatus.FAILED).catch(() => {});
       if (this.io) this.io.to(taskId).emit('task:state', { taskId, status: TaskStatus.FAILED });
     }
+    this._lastMsgAt.delete(taskId);
     this._cleanup(taskId);
   }
 
@@ -220,6 +299,7 @@ class TaskManager {
 
   _cleanup(taskId) {
     this.activeTaskId = null;
+    this._lastMsgAt.delete(taskId);
     const w = this.workers.get(taskId);
     if (w) {
       try {
@@ -238,5 +318,6 @@ class TaskManager {
   }
 }
 
-/** 单例导出（全工程共享同一管理器） */
+/** 单例导出（全工程共享同一管理器）；同时导出类本身供单元测试实例化 */
 module.exports = new TaskManager();
+module.exports.TaskManager = TaskManager;

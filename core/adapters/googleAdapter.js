@@ -48,7 +48,23 @@
  *       - 未命中时抛出明确中文诊断（域名未进排名 / 标题未中关键词）。
  */
 
+const fs = require('fs');
+const path = require('path');
 const { PlatformAdapter } = require('./platformAdapter');
+
+// ── 验证码诊断（临时，修复漏报后移除）──────────────────────────────────────
+// 捕获当前 _isCaptchaPage 漏报的「疑似验证插页」：命中 reCAPTCHA 元素或中/英验证
+// 文案、但 _isCaptchaPage 返回 false 的页面，把 url/title/正文前 800 字落地到
+// data/captcha-diag-YYYYMMDD.log，供据此精修正则。置 AUTOCLAW_CAPTCHA_DIAG=0 关闭。
+const DATA_DIR = path.join(__dirname, '..', '..', 'data');
+try {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+} catch (e) {}
+const CAPTCHA_DIAG_FILE = path.join(
+  DATA_DIR,
+  `captcha-diag-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.log`
+);
+const DIAG_ON = process.env.AUTOCLAW_CAPTCHA_DIAG !== '0';
 
 /**
  * 拟人随机整数 [min, max]，用于打字节奏 / 滚动 / 停顿的抖动。
@@ -295,6 +311,59 @@ class GoogleAdapter extends PlatformAdapter {
   }
 
   /**
+   * 验证码诊断（临时）：捕获当前 _isCaptchaPage 漏报的「疑似验证插页」。
+   * 当页面命中 reCAPTCHA 元素或中/英验证文案、但 _isCaptchaPage 返回 false 时，
+   * 把 url/title/正文前 800 字追加到 captcha-diag 日志，供据此精修正则。
+   * 同一 url 仅记录一次（避免轮询期刷屏）。不抛错、不影响主流程。
+   * @param {import('playwright').Page} page
+   * @param {string} stage
+   */
+  async _diagSuspectedCaptcha(page, stage) {
+    if (!DIAG_ON) return;
+    try {
+      const info = await page.evaluate(() => {
+        const url = location.href;
+        const title = document.title || '';
+        const body = (document.body && document.body.innerText) || '';
+        const low = body.toLowerCase();
+        const hasRecaptcha = !!document.querySelector(
+          'iframe[src*="recaptcha"], iframe[src*="captcha"], .g-recaptcha, #captcha-form, form[action*="captcha"]'
+        );
+        const zh = /请证明您不是机器人|确认您不是机器人|我不是机器人|验证您是真人|您对 google 的访问|请确认您不是机器人|您不是机器人/.test(
+          body
+        );
+        const en = /unusual traffic|please show you|confirm you are a human|our systems have detected|i'?m not a robot|verify you are human|please confirm you are not a robot/.test(
+          low
+        );
+        return { url, title, body, hasRecaptcha, zh, en };
+      });
+      // 仅记录「当前检测器漏报」的疑似页（已检测到的由 _notifyCaptcha 计数，不重复）
+      const detected = await this._isCaptchaPage(page);
+      const suspected = info.hasRecaptcha || info.zh || info.en;
+      if (!suspected || detected) return;
+      if (!this._diagSeen) this._diagSeen = new Set();
+      if (this._diagSeen.has(info.url)) return;
+      this._diagSeen.add(info.url);
+      const stamp = new Date().toISOString();
+      const excerpt = (info.body || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 800);
+      const block = [
+        `==== [${stamp}] stage=${stage} ====`,
+        `url: ${info.url}`,
+        `title: ${info.title}`,
+        `signals: hasRecaptcha=${info.hasRecaptcha} zh=${info.zh} en=${info.en} detectedByCurrentDetector=${detected}`,
+        `bodyExcerpt: ${excerpt}`,
+        '',
+      ].join('\n');
+      fs.appendFileSync(CAPTCHA_DIAG_FILE, block, 'utf8');
+    } catch (e) {
+      /* 诊断失败不影响主流程 */
+    }
+  }
+
+  /**
    * 验证码轮询：上限 CAPTCHA_WAIT_MS、间隔 CAPTCHA_POLL_INTERVAL。
    * 命中谷歌异常流量拦截后进入轮询，提示用户在可见 Chrome 窗口手动过码；
    * 过码后调用 onSolved 回调（用于补充处理离开拦截后可能再次弹出的同意页），
@@ -356,6 +425,8 @@ class GoogleAdapter extends PlatformAdapter {
 
         // 非拦截态：仅等待搜索框挂载进 DOM（不要求可见，规避某些布局下隐藏态）
         await page.waitForSelector(SEARCH_BOX, { state: 'attached', timeout: 15000 });
+        // 诊断：捕获 _isCaptchaPage 漏报但仍停在验证插页的异常态（open 阶段）
+        await this._diagSuspectedCaptcha(page, 'open');
         return;
       } catch (e) {
         lastErr = e;
@@ -504,10 +575,13 @@ class GoogleAdapter extends PlatformAdapter {
           );
         }
       }
-      // 否则页面仍在加载，继续轮询
+      // 否则页面仍在加载（或命中当前检测器漏报的验证插页）→ 诊断抓取
+      await this._diagSuspectedCaptcha(page, 'search-poll');
       await page.waitForTimeout(CAPTCHA_POLL_INTERVAL);
       elapsed += CAPTCHA_POLL_INTERVAL;
     }
+    // 超时前最后抓取一次，确认是否漏报验证插页
+    await this._diagSuspectedCaptcha(page, 'search-poll-timeout');
     throw new Error('谷歌结果页未加载或验证未通过（ERR_GOOGLE_CAPTCHA）');
   }
 

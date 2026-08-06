@@ -140,6 +140,13 @@ function buildTaskConfig(payload) {
   const rememberedWifis = Array.isArray(payload.rememberedWifis)
     ? payload.rememberedWifis.map(String).filter(Boolean)
     : [];
+  // 隐藏网络白名单（v0.3.48）：用户在面板「添加隐藏 WiFi」显式加入并连通的 SSID。
+  // 隐藏网络不广播 SSID、扫描永远不可见，轮询时需豁免可见性检查；
+  // 而其余「已存但扫不到」的历史 profile（换地点后的旧网络）仍应被过滤掉，
+  // 否则每轮都会白白尝试一堆连不上的网络（每个约 10s+），拖慢任务并刷屏日志。
+  const hiddenWifis = Array.isArray(payload.hiddenWifis)
+    ? payload.hiddenWifis.map(String).filter(Boolean)
+    : [];
 
   const taskId = payload.taskId || crypto.randomUUID();
   const rounds = buildRounds(platforms, keywords);
@@ -156,6 +163,7 @@ function buildTaskConfig(payload) {
     clientId: clientId,
     pollWifi: pollWifi,
     rememberedWifis: rememberedWifis,
+    hiddenWifis: hiddenWifis,
     createdAt: new Date().toISOString(),
     status: TaskStatus.PENDING,
     rounds: rounds,
