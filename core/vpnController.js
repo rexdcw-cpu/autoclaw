@@ -136,6 +136,22 @@ function _transport() {
   return _overrideTransport || _defaultTransport;
 }
 
+/**
+ * 硬超时包装：无论内部 promise 是否真的会 settle（如底层 socket 半开、Node 超时事件未触发），
+ * 都保证在 timeoutMs 内 reject，避免调用方永久挂起（曾导致 worker 在「谷歌阶段诊断」处静默卡死 10 分钟被看门狗强杀）。
+ */
+function withTimeout(promise, timeoutMs, label) {
+  let timer = null;
+  const guarded = Promise.race([
+    Promise.resolve().then(() => promise),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error((label || '操作') + ' 超时（' + timeoutMs + 'ms）')), timeoutMs);
+    }),
+  ]);
+  // 无论成败都清理定时器，避免泄漏
+  return guarded.finally(() => { if (timer) clearTimeout(timer); });
+}
+
 function _authHeaders(cfg) {
   const h = { 'Content-Type': 'application/json', Accept: 'application/json' };
   if (cfg.secret) h['Authorization'] = 'Bearer ' + cfg.secret;
@@ -184,7 +200,13 @@ async function _testDelay(nodeName, cfg) {
     cfg.api + '/proxies/' + enc + '/delay?url=' +
     encodeURIComponent(cfg.delayUrl) + '&timeout=5000';
   try {
-    const r = await _transport()('GET', url, { headers: _authHeaders(cfg), timeoutMs: 7000 });
+    // 硬超时兜底：即便底层 socket 处于「连上但不响应、Node 超时事件未触发」的半开状态，
+    // 也保证 9s 内必有结果（transport 自带 7s 超时，这里再垫一层保险）。
+    const r = await withTimeout(
+      _transport()('GET', url, { headers: _authHeaders(cfg), timeoutMs: 7000 }),
+      9000,
+      'VPN 节点延迟探测',
+    );
     if (!r.status || r.status < 200 || r.status >= 300) return null;
     const j = JSON.parse(r.body || '{}');
     if (typeof j.delay === 'number') return j.delay;
@@ -203,7 +225,7 @@ async function _testDelay(nodeName, cfg) {
  *   - proxyUrl：给 Chrome 用的代理地址
  *   任何异常都返回 available:[]（让上层优雅跳过谷歌，而非崩溃）
  */
-async function getAvailableMainNodes() {
+async function _getAvailableMainNodes() {
   const cfg = resolveConfig();
   const proxyUrl = getProxyUrl(cfg);
   try {
@@ -234,6 +256,29 @@ async function getAvailableMainNodes() {
       proxyUrl: proxyUrl,
     };
   } catch (e) {
+    return {
+      available: [],
+      availableDetail: [],
+      unavailable: [],
+      current: null,
+      total: 0,
+      proxyUrl: proxyUrl,
+      error: e.message,
+    };
+  }
+}
+
+/**
+ * 对外入口：在 _getAvailableMainNodes 之上加「整体超时兜底」。
+ * 即便内部某个节点探测卡死（半开连接未触发超时），整体也保证 90s 内必有返回，
+ * 避免调用方（worker 谷歌阶段入口）永久挂起被看门狗强杀。超时则返回 available:[]，
+ * 由上层优雅跳过谷歌并告警，而非整任务静默失败。
+ */
+async function getAvailableMainNodes() {
+  try {
+    return await withTimeout(_getAvailableMainNodes(), 90000, 'VPN 主节点诊断');
+  } catch (e) {
+    const proxyUrl = getProxyUrl();
     return {
       available: [],
       availableDetail: [],

@@ -20,6 +20,24 @@
 const fs = require('fs');
 const path = require('path');
 
+// 串行化所有磁盘写入：autoclaw 虽为单进程，但「百度 / 谷歌」两阶段（乃至同阶段多次 save）
+// 会并发写同一份滚动汇总文件 task-completion-stats.json，Windows 下并发写同一文件会触发
+// EPERM（文件锁冲突）并留下截断的半成品 JSON。用模块级 Promise 链做串行锁即可消除。
+let _writeChain = Promise.resolve();
+function withWriteLock(fn) {
+  const next = _writeChain.then(fn, fn);
+  _writeChain = next.then(() => {}, () => {}); // 吞掉错误，避免锁链断裂
+  return next;
+}
+
+// 原子落盘：先写临时文件再用 rename 覆盖，避免进程被杀 / 并发时留下半截 JSON。
+// （Windows 下同目录 rename 为原子操作且允许覆盖既有目标）
+function atomicWriteSync(file, data) {
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, data, 'utf8');
+  fs.renameSync(tmp, file);
+}
+
 const DEFAULT_DATA_DIR = path.join(__dirname, '..', 'data');
 
 function getDataDir() {
@@ -268,34 +286,42 @@ function save(run, fileSuffix) {
   const mdFile = path.join(dir, 'task-stats-' + run.taskId + suffix + '.md');
   const rollingFile = path.join(dir, 'task-completion-stats.json');
 
-  fs.writeFileSync(perFile, JSON.stringify(run, null, 2), 'utf8');
-  fs.writeFileSync(mdFile, renderMarkdown(run), 'utf8');
-
-  let arr = [];
-  if (fs.existsSync(rollingFile)) {
+  // 所有统计写入串行化 + 原子落盘，彻底消除并发 EPERM 与半成品 JSON 损坏。
+  // 写入属非致命副作用：即便失败也仅在日志中记录，绝不冒泡，避免拖累主任务被误标 failed。
+  withWriteLock(() => {
     try {
-      const parsed = JSON.parse(fs.readFileSync(rollingFile, 'utf8'));
-      if (Array.isArray(parsed)) arr = parsed;
+      fs.writeFileSync(perFile, JSON.stringify(run, null, 2), 'utf8');
+      fs.writeFileSync(mdFile, renderMarkdown(run), 'utf8');
+
+      let arr = [];
+      if (fs.existsSync(rollingFile)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(rollingFile, 'utf8'));
+          if (Array.isArray(parsed)) arr = parsed;
+        } catch (e) {
+          arr = [];
+        }
+      }
+      arr.push({
+        taskId: run.taskId,
+        platform: run.platform || null,
+        startedAt: run.startedAt,
+        endedAt: run.endedAt,
+        savedAt: run.savedAt,
+        durationMs: run.durationMs,
+        pollWifi: run.pollWifi,
+        keyword: run.keyword,
+        keywords: run.keywords,
+        clientId: run.clientId,
+        vpn: run.vpn || null,
+        summary: run.summary,
+      });
+      if (arr.length > 200) arr = arr.slice(-200);
+      atomicWriteSync(rollingFile, JSON.stringify(arr, null, 2));
     } catch (e) {
-      arr = [];
+      console.error('[taskStats] 统计落盘失败（已降级，不影响任务主体）:', e && e.message);
     }
-  }
-  arr.push({
-    taskId: run.taskId,
-    platform: run.platform || null,
-    startedAt: run.startedAt,
-    endedAt: run.endedAt,
-    savedAt: run.savedAt,
-    durationMs: run.durationMs,
-    pollWifi: run.pollWifi,
-    keyword: run.keyword,
-    keywords: run.keywords,
-    clientId: run.clientId,
-    vpn: run.vpn || null,
-    summary: run.summary,
   });
-  if (arr.length > 200) arr = arr.slice(-200);
-  fs.writeFileSync(rollingFile, JSON.stringify(arr, null, 2), 'utf8');
 
   return { perFile: perFile, mdFile: mdFile, rollingFile: rollingFile };
 }

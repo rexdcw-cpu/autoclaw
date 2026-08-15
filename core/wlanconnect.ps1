@@ -73,12 +73,12 @@ if (-not $Profile) { Write-Host "FAIL: -Profile required"; exit 2 }
 if (-not $Ssid)  { $Ssid = $Profile }
 
 $h = [IntPtr]::Zero
-$ver = 0
-[void][WlanConnectEx]::WlanOpenHandle(2, [IntPtr]::Zero, [ref]$ver, [ref]$h)
-
+[uint32]$ver = 0
+$openRc = [WlanConnectEx]::WlanOpenHandle(2, [IntPtr]::Zero, [ref]$ver, [ref]$h)
+if ($openRc -ne 0) { Write-Host "FAIL: WlanOpenHandle rc=$openRc h=$h ver=$ver"; [void][WlanConnectEx]::WlanCloseHandle($h,[IntPtr]::Zero); exit 4 }
 $ifListPtr = [IntPtr]::Zero
 $rc = [WlanConnectEx]::WlanEnumInterfaces($h, [IntPtr]::Zero, [ref]$ifListPtr)
-if ($rc -ne 0) { Write-Host "FAIL: WlanEnumInterfaces rc=$rc"; [void][WlanConnectEx]::WlanCloseHandle($h,[IntPtr]::Zero); exit 3 }
+if ($rc -ne 0) { Write-Host "FAIL: WlanEnumInterfaces rc=$rc h=$h"; [void][WlanConnectEx]::WlanCloseHandle($h,[IntPtr]::Zero); exit 3 }
 $ifList = [System.Runtime.InteropServices.Marshal]::PtrToStructure($ifListPtr, [type][WlanConnectEx+WLAN_INTERFACE_INFO_LIST])
 
 $guid = $null

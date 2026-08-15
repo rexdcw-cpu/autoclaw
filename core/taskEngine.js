@@ -270,7 +270,13 @@ class TaskEngine {
         }
       }
     } finally {
-      await session.close();
+      // 防御：浏览器关闭在持久化上下文异常时可能挂起，导致 worker 永久卡死、
+      // 看门狗 10 分钟无心跳强杀。加硬超时兜底，超时也强制返回，保证任务能收尾出统计。
+      try {
+        await withTimeout(session.close(), 30000);
+      } catch (e) {
+        console.error('[eng] session.close 超时/异常，强制继续收尾:', (e && e.message) || e);
+      }
     }
 
     // 终态推导优先级：熔断 > 停止 > 暂停 > 完成
@@ -510,7 +516,12 @@ class TaskEngine {
       return false;
     }
 
-    const page = await this.ctx.newPage();
+    // 防御：newPage 在 context 异常时可能永久挂起且无任何事件 emit，
+    // 导致看门狗 10 分钟无心跳强杀。加超时兜底，超时则抛错走本轮失败分支。
+    const page = await withTimeout(
+      this.ctx.newPage(),
+      Math.max(30000, (this.config.strategy && this.config.strategy.actionTimeoutMs) || 60000),
+    );
     const round = P.makeRound(
       taskId,
       plan.platform,

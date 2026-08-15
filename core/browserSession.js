@@ -215,23 +215,36 @@ class BrowserSession {
    * 临时 profile（默认）顺手删除；持久化 profile（AUTOCLAW_CHROME_USER_DATA）保留。
    */
   async close() {
+    const tag = '[browserSession.close]';
+    // 优先用 browser 引用（browser.close 对持久化上下文安全）；仅当 browser 丢失时
+    // 才退回 context.browser()，绝对避免直接 context.close()（持久化上下文会挂起）。
     const b = this.browser || (this.context && this.context.browser && this.context.browser());
     const proc = b && b.process && b.process();
-    const closePromise = b ? b.close() : this.context ? this.context.close() : Promise.resolve();
-    // 主关闭：10s 兜底超时，避免任务 finally 卡死
+    console.error(tag, '开始关闭 browser=' + (!!b) + ' proc=' + (proc && proc.pid));
+    const closePromise = b ? b.close() : Promise.resolve();
+    // 主关闭：10s 兜底超时，避免任务 finally 卡死（异步挂起时 race 在 10s 返回）
     try {
       await Promise.race([
-        closePromise.catch(() => {}),
+        closePromise.catch((e) => console.error(tag, 'browser.close rejected:', (e && e.message) || e)),
         new Promise((resolve) => setTimeout(resolve, 10000)),
       ]);
     } catch (_) {}
-    // 兜底强杀：browser.close() 已返回但 Chrome OS 进程可能仍残留并占用 profile 锁，
-    // 显式杀进程树确保锁释放。
+    console.error(tag, 'browser.close 阶段完成');
+    // 兜底强杀：browser.close() 已返回但 Chrome 进程树可能仍残留并占用 profile 锁，
+    // 显式杀进程树确保锁释放。先 SIGKILL（Node 原生，不依赖 taskkill 系统工具），
+    // 再 taskkill /T 兜底（加 8s 超时，被策略拦截时抛错被吞，不阻塞）。
     if (proc && !proc.killed) {
       try { proc.kill('SIGKILL'); } catch (_) {}
       try {
-        execSync('taskkill /PID ' + proc.pid + ' /F /T', { stdio: 'ignore', windowsHide: true });
+        execSync('taskkill /PID ' + proc.pid + ' /F /T', {
+          stdio: 'ignore',
+          windowsHide: true,
+          timeout: 8000,
+          killSignal: 'SIGKILL',
+        });
       } catch (_) {}
+      // 二次确认（taskkill 被策略拦截时靠上面的 SIGKILL 已处理；仍残留则补一刀）
+      try { if (proc && !proc.killed) proc.kill('SIGKILL'); } catch (_) {}
     }
     // 临时 profile 清理（持久化 profile 保留，不删）
     if (this._isTempProfile && this._userDataDir) {
@@ -240,6 +253,7 @@ class BrowserSession {
     this.context = null;
     this.browser = null;
     this._userDataDir = null;
+    console.error(tag, '关闭完成');
   }
 }
 

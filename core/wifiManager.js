@@ -32,21 +32,56 @@ const path = require('path');
  * @returns {Promise<string>}
  */
 function runNetsh(args) {
-  return new Promise((resolve) => {
-    const cmd = 'chcp 65001 >nul && netsh wlan ' + args;
-    exec(
-      cmd,
-      { encoding: 'utf8', maxBuffer: 1024 * 1024 },
-      (err, stdout, stderr) => {
-        // 部分命令即使非零退出也会输出有用信息，尽量返回全部
-        resolve((stdout || '') + (stderr || ''));
-      },
-    );
-  });
+  const cmd = 'chcp 65001 >nul && netsh wlan ' + args;
+  return execSafe(cmd, { timeoutMs: 20000 }).then((r) => r.out);
 }
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * 安全执行外部命令（netsh / powershell 等）。
+ * 关键：带硬超时，超时即杀子进程并 resolve（绝不 hang / 绝不 throw）。
+ * 背景：异常网络状态下 netsh / wlanconnect.ps1 可能永不退出（如本机 Add-Type
+ * 编译卡死、WlanConnect 阻塞），若用裸 exec 且回调永远 resolve，promise 会永久
+ * 挂起，拖垮整个任务（被 10 分钟看门狗 SIGKILL，表现为「静默假失败」）。
+ * 故统一走 execSafe，超时兜底强制结束。
+ * @param {string} cmd
+ * @param {object} [opts] { timeoutMs? }
+ * @returns {Promise<{out:string, err:Error|null, timedOut:boolean}>}
+ */
+function execSafe(cmd, opts) {
+  const o = opts || {};
+  const timeoutMs = o.timeoutMs || 20000;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      resolve(val);
+    };
+    let cp;
+    try {
+      cp = exec(
+        cmd,
+        { encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true, timeout: timeoutMs },
+        (err, stdout, stderr) => {
+          finish({ out: ((stdout || '') + (stderr || '')), err: err || null, timedOut: !!(err && err.killed) });
+        },
+      );
+    } catch (e) {
+      finish({ out: '', err: e, timedOut: false });
+      return;
+    }
+    // 双保险：即便 exec 的 timeout 选项未触发，也强制在超时 + 缓冲后兜底结束子进程
+    const guard = setTimeout(() => {
+      if (settled) return;
+      try { if (cp && cp.pid) cp.kill('SIGKILL'); } catch (_) { /* ignore */ }
+      finish({ out: '', err: new Error('exec guard timeout'), timedOut: true });
+    }, timeoutMs + 5000);
+    if (guard.unref) guard.unref();
+  });
 }
 
 function hashStr(s) {
@@ -284,6 +319,17 @@ async function connect(ssid, password, opts) {
         message: '『' + ssid + '』是企业网络（需账号/证书），暂不支持',
       };
     }
+    // 本机已有保存凭证 → 无需重新输密码，直接无密码直连（与 hidden 分支一致）。
+    // 否则可见加密网没填密码就只会报「该网络需要密码」，即便本机明明存了密码。
+    let savedInfo = null;
+    try {
+      savedInfo = await getProfileInfo(ssid);
+    } catch (e) {
+      /* 读取失败按无 profile 处理 */
+    }
+    if (savedInfo && !password) {
+      return await connectSaved(ssid);
+    }
     if (sec.authentication !== 'open' && !password) {
       return { ok: false, code: 'ERR_WIFI_NEED_PASSWORD', message: '该网络需要密码' };
     }
@@ -338,10 +384,11 @@ async function connect(ssid, password, opts) {
       // 隐藏网络：netsh connect 不做定向探测（且不支持 ssid= 参数），必须用
       // WlanConnect API 显式带 SSID 才会主动 probe 该隐藏 SSID。可见网络仍走
       // netsh connect（更快、行为不变）。
-      const conn = !net && opts.hidden
-        ? await wlanConnectDirected(ssid, { interface: iface, timeout: 30 })
-        : await runNetsh('connect name="' + ssid + '" interface="' + iface + '"');
-      for (let i = 0; i < 5; i++) {
+      // 隐藏网 profile 已带 nonBroadcast，netsh connect 会主动探测该 SSID，无需 C#/WlanConnect。
+      const conn = await runNetsh(
+        'connect name="' + ssid + '" interface="' + iface + '"',
+      );
+      for (let i = 0; i < 8; i++) {
         const cur = await getCurrentSsid(iface);
         if (cur === ssid) {
           return {
@@ -585,24 +632,22 @@ async function wlanConnectDirected(ssid, opts) {
   ];
   const quoted = cli.map((a) => '"' + String(a).replace(/"/g, '\\"') + '"').join(' ');
   return new Promise((resolve) => {
-    exec(
-      'powershell ' + quoted,
-      { encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true },
-      (err, stdout, stderr) => {
-        const out = ((stdout || '') + (stderr || '')).trim();
-        if (/OK:\s*connected/i.test(out)) {
-          resolve({ ok: true, message: '已连接到『' + ssid + '』（定向探测）' });
-          return;
-        }
-        const m = out.match(/FAIL:\s*(.+)$/m);
-        resolve({
-          ok: false,
-          code: 'ERR_WIFI_CONNECT_FAILED',
-          message: m ? m[1].trim() : out || 'WlanConnect 调用失败',
-          diagnostics: { raw: out },
-        });
-      },
-    );
+    // execSafe 自带硬超时：即便 wlanconnect.ps1 内部 Add-Type 编译卡死 / WlanConnect 阻塞，
+    // 也会在超时后被杀并 resolve 失败，绝不会让调用方（connectSaved）无限挂起。
+    execSafe('powershell ' + quoted, { timeoutMs: (timeout + 15) * 1000 }).then((r) => {
+      const out = r.out.trim();
+      if (/OK:\s*connected/i.test(out)) {
+        resolve({ ok: true, message: '已连接到『' + ssid + '』（定向探测）' });
+        return;
+      }
+      const m = out.match(/FAIL:\s*(.+)$/m);
+      resolve({
+        ok: false,
+        code: 'ERR_WIFI_CONNECT_FAILED',
+        message: m ? m[1].trim() : (r.timedOut ? 'WlanConnect 调用超时（已兜底终止子进程）' : (out || 'WlanConnect 调用失败')),
+        diagnostics: { raw: out, timedOut: r.timedOut },
+      });
+    });
   });
 }
 
@@ -614,13 +659,6 @@ async function wlanConnectDirected(ssid, opts) {
  */
 async function connectSaved(ssid) {
   const iface = await getInterface();
-  const conn = await runNetsh('connect name="' + ssid + '" interface="' + iface + '"');
-  for (let i = 0; i < 8; i += 1) {
-    const cur = await getCurrentSsid(iface);
-    if (cur === ssid) return { ok: true, message: '已连接到『' + ssid + '』' };
-    await sleep(1000);
-  }
-  // 隐藏网络：netsh connect 不做定向探测会失败 → 改用 WlanConnect 显式带 SSID。
   let hidden = false;
   try {
     const info = await getProfileInfo(ssid);
@@ -628,14 +666,27 @@ async function connectSaved(ssid) {
   } catch (e) {
     /* 读取失败按非隐藏 */
   }
+  // 主路径：netsh wlan connect。隐藏网 profile 已标记 nonBroadcast，netsh 会主动
+  // 探测未广播的 SSID（与 Windows 手动连同源）；实测本机 ROSNET 系列可正常切换。
+  // 旧实现对隐藏网走 WlanConnect Win32 API（wlanconnect.ps1 / Add-Type 编译 C#），
+  // 但本机 Add-Type 调 csc.exe 编译失败（FileNotFound，DLL 未生成）→ 类型不存在 →
+  // 整条路径不可用，所有隐藏网切换失败、任务被标 failed。故统一走 netsh 主路径，
+  // WlanConnect 仅作兜底。
+  const conn = await runNetsh('connect name="' + ssid + '" interface="' + iface + '"');
+  for (let i = 0; i < 8; i += 1) {
+    const cur = await getCurrentSsid(iface);
+    if (cur === ssid) return { ok: true, message: '已连接到『' + ssid + '』' };
+    await sleep(1000);
+  }
+  // 兜底：netsh 未连上（个别纯隐藏网/缓存异常）时，再试 WlanConnect API 定向探测。
   if (hidden) {
-    const d = await wlanConnectDirected(ssid, { interface: iface, timeout: 30 });
+    const d = await wlanConnectDirected(ssid, { timeout: 20 });
     if (d.ok) return d;
     return {
       ok: false,
       code: 'ERR_WIFI_CONNECT_FAILED',
-      message: '切换至隐藏网络『' + ssid + '』未完成（' + (d.message || '定向探测失败') + '）',
-      diagnostics: Object.assign({ conn }, d.diagnostics || {}),
+      message: '切换至『' + ssid + '』未完成（信号弱或凭证失效）',
+      diagnostics: { conn, wlanConnect: d },
     };
   }
   return {
@@ -677,16 +728,8 @@ module.exports = {
  * @returns {Promise<string>}
  */
 function runNetshRaw(args) {
-  return new Promise((resolve) => {
-    const cmd = 'chcp 65001 >nul && netsh ' + args;
-    exec(
-      cmd,
-      { encoding: 'utf8', maxBuffer: 1024 * 1024 },
-      (err, stdout, stderr) => {
-        resolve((stdout || '') + (stderr || ''));
-      },
-    );
-  });
+  const cmd = 'chcp 65001 >nul && netsh ' + args;
+  return execSafe(cmd, { timeoutMs: 20000 }).then((r) => r.out);
 }
 
 /**

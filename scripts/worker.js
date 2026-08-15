@@ -40,6 +40,8 @@
  * 行为与 v0.3.19 完全一致（整段 engine.run 包在 WiFi 轮询外层，一份混合统计）。
  */
 
+const fs = require('fs');
+const path = require('path');
 const { TaskEngine } = require('../core/taskEngine');
 const VpnController = require('../core/vpnController');
 const wifi = require('../core/wifiManager');
@@ -237,6 +239,7 @@ async function runPhased(config, emit, deps) {
   // 阶段一 · 百度（WiFi 轮询，不碰 VPN）
   // ---------------------------------------------------------------------
   if (baiduRounds.length) {
+   try {
     const wifiSeq = config.pollWifi ? await buildWifiSeq(config, wm) : null;
     const seq = wifiSeq ? wifiSeq.seq : [null];
     if (wifiSeq) {
@@ -281,6 +284,23 @@ async function runPhased(config, emit, deps) {
       stats: run.summary,
       statsDetail: run,
     }));
+   } catch (baiduErr) {
+    // 百度阶段异常：保底落盘部分统计并回传错误，避免像 1617 那样「无完成度文件、进度日志无痕迹」直接判 failed。
+    console.error('[worker] 百度阶段异常：', baiduErr && baiduErr.stack ? baiduErr.stack : baiduErr);
+    if (currentRun) {
+      try {
+        currentRun.endedAt = new Date().toISOString();
+        statsMod.save(currentRun, 'baidu');
+      } catch (_) {}
+    }
+    emit(P.makeProgress({
+      taskId: config.taskId,
+      type: EventType.ALERT,
+      message: '【百度阶段】异常中断：' + (baiduErr && baiduErr.message ? baiduErr.message : baiduErr),
+    }));
+    if (finalStatus !== TaskStatus.PAUSED && finalStatus !== TaskStatus.STOPPED) finalStatus = TaskStatus.FAILED;
+    reportFatal(baiduErr);
+   }
   }
 
   // ---------------------------------------------------------------------
@@ -305,9 +325,25 @@ async function runPhased(config, emit, deps) {
 
     let diag;
     try {
+      emit(P.makeProgress({
+        taskId: config.taskId,
+        type: EventType.VPN_INFO,
+        message: '【谷歌阶段】开始探测 VPN 主节点（最多等待 90s，超时则跳过谷歌）…',
+      }));
       diag = await vpn.getAvailableMainNodes();
+      emit(P.makeProgress({
+        taskId: config.taskId,
+        type: EventType.VPN_INFO,
+        message: '【谷歌阶段】VPN 主节点探测完成：可用 ' + (diag.available ? diag.available.length : 0) + '/' + (diag.total || 0) +
+          (diag.error ? '（诊断异常：' + diag.error + '）' : ''),
+      }));
     } catch (e) {
-      diag = { available: [], error: e.message };
+      emit(P.makeProgress({
+        taskId: config.taskId,
+        type: EventType.ALERT,
+        message: '【谷歌阶段】VPN 主节点探测异常：' + (e && e.message ? e.message : e) + '，跳过谷歌',
+      }));
+      diag = { available: [], error: e && e.message ? e.message : String(e) };
     }
     const run = statsMod.newRun(config.taskId, {
       platform: 'google',
@@ -367,6 +403,7 @@ async function runPhased(config, emit, deps) {
       // 补跑模型：维护「尚未尝试过的备用节点池」(pool) + 「已用节点」(used)。
       // 逐个取 pool 头节点跑谷歌；成功则计入成功数；失败则记 failed 并自动从 pool 取下一个补跑；
       // 直到成功数达标（targetCount）或 pool 耗尽（不留缺口，有多少成功算多少）。
+      try {
       const pool = diag.available.slice();
       // v0.3.40：谷歌软降权高标记共享节点（如 [HK]香港直连HK3 GPT 这类热门出口最易被 Google 标记）。
       // 默认开启：把命中模式的节点移到 pool 末尾，优先用低标记节点；若前面成功数已达标，高标记节点不会被使用。
@@ -404,24 +441,23 @@ async function runPhased(config, emit, deps) {
         usedOrder.push(node);
         pollIndex += 1;
         if (abort) { finalStatus = worstStatus(finalStatus, abortStatus); break; }
+        let nodeAttempt = 0, gT0 = 0, gT1 = 0;
         try {
-          await vpn.selectNode(node);
-        } catch (e) { /* 切节点失败不阻断，沿用 */ }
+          try {
+            await vpn.selectNode(node);
+          } catch (e) { /* 切节点失败不阻断，沿用 */ }
 
-        const preset = {
-          node: node,
-          availableCount: diag.available.length,
-          total: diag.total,
-          proxyUrl: diag.proxyUrl,
-          availableDetail: diag.availableDetail || null,
-        };
-        // 节点内重试循环：该节点最多尝试 nodeRetries+1 次（含首次），任一次成功即停。
-        let nodeAttempt = 0;
-        let st = TaskStatus.FAILED;
-        let nodeErr = null;
-        let gT0 = 0;
-        let gT1 = 0;
-        while (nodeAttempt <= nodeRetries) {
+          const preset = {
+            node: node,
+            availableCount: diag.available.length,
+            total: diag.total,
+            proxyUrl: diag.proxyUrl,
+            availableDetail: diag.availableDetail || null,
+          };
+          // 节点内重试循环：该节点最多尝试 nodeRetries+1 次（含首次），任一次成功即停。
+          let st = TaskStatus.FAILED;
+          let nodeErr = null;
+          while (nodeAttempt <= nodeRetries) {
           nodeAttempt += 1;
           // 给谷歌单独注入更短的单动作超时（不影响百度 150s 验证码余量）。
           const gConfig = Object.assign({}, config, {
@@ -476,6 +512,26 @@ async function runPhased(config, emit, deps) {
           finalStatus = st;
           break;
         }
+        } catch (nodeRunErr) {
+          // 单节点执行异常（含浏览器原生崩溃 / 启动失败 / 超时）：记录为失败并继续换下一个备选节点补跑，
+          // 不再让单个坏节点拖垮整个谷歌阶段（修复「全 round success 却整任务 failed」的假失败）。
+          console.error('[worker] 节点『' + node + '』执行异常：', nodeRunErr && nodeRunErr.stack ? nodeRunErr.stack : nodeRunErr);
+          statsMod.recordWifi(run, {
+            ssid: node, via: 'vpn', status: 'failed',
+            attempts: nodeAttempt, retriesUsed: Math.max(0, nodeAttempt - 1),
+            startedAt: new Date(gT0 || Date.now()).toISOString(), endedAt: new Date().toISOString(),
+            durationMs: gT0 ? Math.max(0, Date.now() - gT0) : 0,
+            found: false, landedUrl: null, captcha: false,
+            error: nodeRunErr && nodeRunErr.message ? nodeRunErr.message : String(nodeRunErr),
+          });
+          emit(P.makeProgress({
+            taskId: config.taskId,
+            type: EventType.ALERT,
+            message: '【谷歌阶段】节点『' + node + '』执行异常，跳过并补跑下一个：' + (nodeRunErr && nodeRunErr.message ? nodeRunErr.message : nodeRunErr),
+          }));
+        }
+        // 每节点后增量落盘 google 统计，确保中途崩溃也能保留已完成节点的成果
+        try { statsMod.save(run, 'google'); } catch (_) {}
       }
 
       // 补跑模型下的整阶段终态判定：
@@ -508,6 +564,16 @@ async function runPhased(config, emit, deps) {
         availableDetail: diag.availableDetail || null,
         polledBy: 'node',
       });
+      } catch (phaseErr) {
+        console.error('[worker] 谷歌阶段循环异常：', phaseErr && phaseErr.stack ? phaseErr.stack : phaseErr);
+        emit(P.makeProgress({
+          taskId: config.taskId,
+          type: EventType.ALERT,
+          message: '【谷歌阶段】循环异常中断：' + (phaseErr && phaseErr.message ? phaseErr.message : phaseErr),
+        }));
+        if (finalStatus !== TaskStatus.PAUSED && finalStatus !== TaskStatus.STOPPED) finalStatus = TaskStatus.FAILED;
+      }
+
     }
 
     run.endedAt = new Date().toISOString();
@@ -854,7 +920,23 @@ process.on('message', async (msg) => {
   }
 });
 
-process.on('unhandledRejection', (reason) => {
+/** 把崩溃栈持久化到 data/worker-crash-<taskId>-<ts>.log，确保即使 IPC 丢失也能查到原因 */
+function persistCrashLog(detail) {
+  try {
+    const stack = detail && detail.stack ? detail.stack : String(detail);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const dataDir = path.join(__dirname, '..', 'data');
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+    const taskId = (engine && engine.config && engine.config.taskId) || 'unknown';
+    const file = path.join(dataDir, 'worker-crash-' + taskId + '-' + ts + '.log');
+    fs.writeFileSync(file, '[worker 崩溃] ' + new Date().toISOString() + '\n' + stack + '\n');
+  } catch (_) { /* 落盘失败不阻断进程 */ }
+}
+
+/** 统一把致命错误经 IPC 回传主进程（确保失败可见、不再静默崩进程丢状态） */
+function reportFatal(detail) {
+  persistCrashLog(detail);
+  const stack = detail && detail.stack ? detail.stack : String(detail);
   if (process.send) {
     process.send({
       type: 'error',
@@ -862,10 +944,25 @@ process.on('unhandledRejection', (reason) => {
         taskId: engine && engine.config && engine.config.taskId,
         type: EventType.TASK_END,
         status: TaskStatus.FAILED,
-        message: '未处理的拒绝：' + (reason && reason.message ? reason.message : String(reason)),
+        error: stack,
+        message: 'worker 致命错误：' + stack,
       }),
     });
   }
+}
+
+// 同步未捕获异常：此前未注册，导致谷歌阶段循环里的同步异常直接崩进程、
+// 不发任何终态 IPC，任务被 _onWorkerExit 标为 failed 且进度日志无任何错误痕迹。
+// 加上后，任何崩溃都会把真实栈回传，便于定位。
+process.on('uncaughtException', (err) => {
+  console.error('[worker] uncaughtException:', err && err.stack ? err.stack : err);
+  reportFatal(err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  const msg = reason && reason.stack ? reason.stack : (reason && reason.message ? reason.message : String(reason));
+  console.error('[worker] unhandledRejection:', msg);
+  reportFatal('未处理的拒绝：' + msg);
 });
 
 module.exports = { runTask, runLegacy, runPhased, buildWifiSeq, normalizeSsidKey, sleep };

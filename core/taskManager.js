@@ -15,6 +15,7 @@
 
 const { fork } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 const P = require('./progressEvent');
 const { EventType, TaskStatus, ERR } = P;
 const db = require('../config/db');
@@ -51,17 +52,18 @@ class TaskManager {
    */
   _killWorkerTree(pid) {
     if (!pid) return;
+    // 1) 优先 Node 原生 SIGKILL：不依赖 taskkill 系统工具，即使被安全策略拦截也能杀掉 worker。
+    try { process.kill(pid, 'SIGKILL'); } catch (e) { /* 已退出则忽略 */ }
     if (process.platform === 'win32') {
       try {
-        require('child_process').execSync(`taskkill /pid ${pid} /T /F`, { stdio: 'ignore' });
+        // 2) 再用 taskkill /T 连带杀 Chrome 子树（释放 profile 锁）；加 timeout 防止挂起阻塞主进程。
+        require('child_process').execSync(`taskkill /pid ${pid} /T /F`, {
+          stdio: 'ignore',
+          timeout: 8000,
+          killSignal: 'SIGKILL',
+        });
       } catch (e) {
-        /* 已退出或权限不足，忽略 */
-      }
-    } else {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch (e) {
-        /* ignore */
+        /* 已退出或权限不足或超时，忽略 */
       }
     }
   }
@@ -139,10 +141,19 @@ class TaskManager {
     }
 
     const taskId = config.taskId;
+    // T-D3：将 worker 的 stdout/stderr 落盘到 data/worker-<taskId>.log，
+    // 即使 worker 原生崩溃（segfault 等不触发 JS 异常的情形），真实错误栈也不再丢进不可见的控制台窗口。
+    const workerLogPath = path.join(__dirname, '..', 'data', `worker-${taskId}.log`);
+    let workerLogStream = null;
+    try { workerLogStream = fs.createWriteStream(workerLogPath, { flags: 'w' }); } catch (e) {}
     const worker = fork(path.join(__dirname, '..', 'scripts', 'worker.js'), [], {
-      silent: false,
+      silent: true,
       env: process.env,
     });
+    if (workerLogStream) {
+      if (worker.stdout) worker.stdout.pipe(workerLogStream);
+      if (worker.stderr) worker.stderr.pipe(workerLogStream);
+    }
     worker.on('message', (msg) => this._onWorkerMessage(taskId, msg));
     worker.on('exit', (code, signal) => this._onWorkerExit(taskId, code, signal));
 
@@ -150,6 +161,10 @@ class TaskManager {
     worker.send({ type: 'start', config });
 
     this.workers.set(taskId, worker);
+    if (workerLogStream) {
+      if (!this._workerLogStreams) this._workerLogStreams = new Map();
+      this._workerLogStreams.set(taskId, workerLogStream);
+    }
     this.configs.set(taskId, config);
     this.activeTaskId = taskId;
     this.statuses.set(taskId, TaskStatus.RUNNING);
@@ -279,7 +294,27 @@ class TaskManager {
     if (st === TaskStatus.RUNNING || st === TaskStatus.PAUSED) {
       this.statuses.set(taskId, TaskStatus.FAILED);
       db.updateTaskStatus(taskId, TaskStatus.FAILED).catch(() => {});
-      if (this.io) this.io.to(taskId).emit('task:state', { taskId, status: TaskStatus.FAILED });
+      // 把失败原因也写入进度日志缓冲（此前只发 socket alert，进度页/接口看不到原因，
+      // 导致「日志齐全却不知为何失败」）。这样 /api/task/progress 也能回看根因。
+      this._pushLog(taskId, P.makeProgress({
+        taskId,
+        type: EventType.ALERT,
+        message: `任务进程异常退出（code=${code == null ? 'null' : code} signal=${signal || 'null'}），未能正常收尾，详见 worker-${taskId}.log`,
+      }));
+      if (this.io) {
+        this.io.to(taskId).emit('task:state', { taskId, status: TaskStatus.FAILED });
+        this.io.to(taskId).emit('alert', {
+          taskId,
+          level: 'error',
+          message: `任务进程异常退出（code=${code == null ? 'null' : code} signal=${signal || 'null'}），未能正常收尾，详见 worker-${taskId}.log`,
+        });
+      }
+    }
+    // 关闭并落盘 worker 日志流
+    const ls = this._workerLogStreams && this._workerLogStreams.get(taskId);
+    if (ls) {
+      try { ls.end(); } catch (_) {}
+      if (this._workerLogStreams) this._workerLogStreams.delete(taskId);
     }
     this._lastMsgAt.delete(taskId);
     this._cleanup(taskId);
