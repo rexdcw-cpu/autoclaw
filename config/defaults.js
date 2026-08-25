@@ -79,6 +79,9 @@ const DEFAULT_HUMANIZE = {
   hoverProb: num(process.env.AUTOCLAW_HUMANIZE_HOVER, 0.15),
   // 滚轮轻推幅度（px，可正可负）
   wheelAmp: num(process.env.AUTOCLAW_HUMANIZE_WHEEL, 120),
+  // 逐字符键入间隔（ms）：模拟真人打字节奏，替代「一次性灌值」的 isTrusted=false bot 特征
+  typeDelayMin: num(process.env.AUTOCLAW_HUMANIZE_TYPE_MIN, 60),
+  typeDelayMax: num(process.env.AUTOCLAW_HUMANIZE_TYPE_MAX, 200),
 };
 
 module.exports = {

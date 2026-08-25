@@ -33,9 +33,40 @@ function withWriteLock(fn) {
 // 原子落盘：先写临时文件再用 rename 覆盖，避免进程被杀 / 并发时留下半截 JSON。
 // （Windows 下同目录 rename 为原子操作且允许覆盖既有目标）
 function atomicWriteSync(file, data) {
-  const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, data, 'utf8');
-  fs.renameSync(tmp, file);
+  // 每次调用用唯一临时文件名：绕开「上次写中断留下的被锁定固定名 .tmp」导致的持续 EPERM
+  const uniq = process.pid + '.' + Date.now() + '.' + Math.random().toString(36).slice(2, 8);
+  const tmp = file + '.' + uniq + '.tmp';
+  const MAX = 5;
+  for (let attempt = 0; attempt < MAX; attempt++) {
+    // 步骤一：写唯一临时文件（可能被杀软实时扫描 / 索引服务瞬时锁，需重试）
+    try {
+      fs.writeFileSync(tmp, data, 'utf8');
+    } catch (e) {
+      if (e && e.code === 'EPERM' && attempt < MAX - 1) {
+        // 极短等待后重试（同步 busy-wait，约 50ms/次，不显著拖慢主任务）
+        const until = Date.now() + 50; while (Date.now() < until) { /* spin */ }
+        continue;
+      }
+      // 写临时文件彻底失败：回退直接覆盖写目标文件；清理遗留临时文件；仍失败交上层降级
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      try { fs.writeFileSync(file, data, 'utf8'); } catch (_) { /* ignore，交上层降级 */ }
+      return;
+    }
+    // 步骤二：改名落盘（Windows 下目标文件可能被外部进程短暂锁定，需重试）
+    try {
+      fs.renameSync(tmp, file);
+      return;
+    } catch (e) {
+      if (e && e.code === 'EPERM' && attempt < MAX - 1) {
+        const until = Date.now() + 50; while (Date.now() < until) { /* spin */ }
+        continue;
+      }
+      // rename 失败：回退直接覆盖写；清理遗留临时文件；仍失败交上层降级（已降级，不影响任务主体）
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      try { fs.writeFileSync(file, data, 'utf8'); } catch (_) { /* ignore */ }
+      return;
+    }
+  }
 }
 
 const DEFAULT_DATA_DIR = path.join(__dirname, '..', 'data');
@@ -105,22 +136,24 @@ function recordVpn(run, vpn) {
  *   found: 该轮是否真正命中并进入目标站（SEO 关键成功信号，区别于「流程没崩」）
  *   landedUrl: ENTER 阶段实际 goto 的真实地址（命中时记录）
  */
-function recordWifi(run, rec) {
-  run.perWifi.push({
-    ssid: rec.ssid != null ? rec.ssid : null,
-    status: rec.status || 'skipped',
-    attempts: rec.attempts || 0,
-    retriesUsed: rec.retriesUsed || 0,
-    via: rec.via || 'wifi',
-    found: rec.found === true,
-    landedUrl: rec.landedUrl || null,
-    captcha: rec.captcha === true,
-    error: rec.error || null,
-    startedAt: rec.startedAt || null,
-    endedAt: rec.endedAt || null,
-    durationMs: rec.durationMs != null ? rec.durationMs : null,
-  });
-}
+  function recordWifi(run, rec) {
+    run.perWifi.push({
+      ssid: rec.ssid != null ? rec.ssid : null,
+      status: rec.status || 'skipped',
+      attempts: rec.attempts || 0,
+      retriesUsed: rec.retriesUsed || 0,
+      via: rec.via || 'wifi',
+      found: rec.found === true,
+      entered: rec.entered === true,
+      landedUrl: rec.landedUrl || null,
+      captcha: rec.captcha === true,
+      failedStep: rec.failedStep || null,
+      error: rec.error || null,
+      startedAt: rec.startedAt || null,
+      endedAt: rec.endedAt || null,
+      durationMs: rec.durationMs != null ? rec.durationMs : null,
+    });
+  }
 
 /**
  * 汇总分析。
@@ -141,6 +174,8 @@ function summarize(run) {
   const sumNodeDur = nodeDurations.reduce((s, d) => s + d, 0);
   const avgNodeDur = nodeDurations.length ? Math.round(sumNodeDur / nodeDurations.length) : 0;
   const foundCount = run.perWifi.filter((w) => w.found === true).length;
+  const enteredCount = run.perWifi.filter((w) => w.entered === true).length;
+  const failedStepCount = run.perWifi.filter((w) => w.failedStep).length;
   const captchaCount = run.perWifi.filter((w) => w.captcha === true).length;
 
   run.summary = {
@@ -149,9 +184,12 @@ function summarize(run) {
     failedWifi: failed,
     skippedWifi: skipped,
     foundWifi: foundCount,
+    enteredWifi: enteredCount,
     captchaWifi: captchaCount,
+    failedStepWifi: failedStepCount,
     completionRate: total ? Math.round((completed / total) * 100) : 0,
     foundRate: total ? Math.round((foundCount / total) * 100) : 0,
+    enteredRate: total ? Math.round((enteredCount / total) * 100) : 0,
     totalFlowAttempts: totalAttempts,
     totalRetries: totalRetries,
     totalDurationMs: (run.durationMs != null ? run.durationMs : null),
@@ -199,9 +237,12 @@ function renderMarkdown(run) {
   lines.push('| 失败 | ' + s.failedWifi + ' |');
   lines.push('| 跳过（切换失败等） | ' + s.skippedWifi + ' |');
   lines.push('| 完成率 | ' + s.completionRate + '% |');
-  lines.push('| 命中目标率（找到并进入目标站） | ' + s.foundRate + '%（' + s.foundWifi + '/' + s.totalWifi + '） |');
+  lines.push('| 命中目标率（搜索结果中找到目标链接） | ' + s.foundRate + '%（' + s.foundWifi + '/' + s.totalWifi + '） |');
+  lines.push('| 落地率（真正进入目标站） | ' + s.enteredRate + '%（' + s.enteredWifi + '/' + s.totalWifi + '） |');
   if (run.platform === 'google') {
     lines.push('| 触发谷歌机器人验证 / 同意页拦截 | ' + s.captchaWifi + ' 个节点 |');
+  } else if (run.platform === 'baidu') {
+    lines.push('| 触发百度安全验证拦截 | ' + s.captchaWifi + ' 个节点 |');
   }
   lines.push('| 流程总尝试次数 | ' + s.totalFlowAttempts + ' |');
   lines.push('| 累计重试次数 | ' + s.totalRetries + ' |');
@@ -247,16 +288,17 @@ function renderMarkdown(run) {
   const detailHeader = run.platform === 'google' ? '## 逐 VPN 节点明细' : '## 逐 WIFI 明细';
   lines.push(detailHeader);
   lines.push('');
-  lines.push('| # | 网络 / VPN 节点 | 终态 | 命中目标 | 验证拦截 | 尝试次数 | 重试次数 | 耗时 | 备注 |');
-  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
+  lines.push('| # | 网络 / VPN 节点 | 终态 | 命中目标 | 落地 | 验证拦截 | 尝试次数 | 重试次数 | 耗时 | 备注 |');
+  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
   run.perWifi.forEach((w, i) => {
     const name = w.ssid || (w.via === 'vpn' ? '当前节点' : '当前网络');
     const axisTag = w.via === 'vpn' ? '（VPN 节点）' : '';
     const foundMark = w.found ? '✅' : (w.status === 'completed' ? '⚠️未命中' : '—');
-    const captchaMark = w.captcha ? '⚠️是' : '—';
-    const note = w.error ? w.error : (w.status === 'completed' ? (w.retriesUsed > 0 ? ('含 ' + w.retriesUsed + ' 次重试后成功') : '一次成功') : '');
+    const enteredMark = w.entered ? '✅' : (w.status === 'completed' ? '⚠️否' : '—');
+    const captchaMark = w.captcha === true ? '⚠️是' : (w.captcha === false ? '否' : '—');
+    const note = w.failedStep ? ('[' + w.failedStep + '] ' + (w.error || '')) : (w.error || (w.status === 'completed' ? (w.retriesUsed > 0 ? ('含 ' + w.retriesUsed + ' 次重试后成功') : '一次成功') : ''));
     const landed = w.landedUrl ? (' → ' + w.landedUrl) : '';
-    lines.push('| ' + (i + 1) + ' | ' + name + axisTag + ' | ' + w.status + ' | ' + foundMark + ' | ' + captchaMark + ' | ' + w.attempts + ' | ' + w.retriesUsed + ' | ' + fmtDur(w.durationMs) + ' | ' + note + landed + ' |');
+    lines.push('| ' + (i + 1) + ' | ' + name + axisTag + ' | ' + w.status + ' | ' + foundMark + ' | ' + enteredMark + ' | ' + captchaMark + ' | ' + w.attempts + ' | ' + w.retriesUsed + ' | ' + fmtDur(w.durationMs) + ' | ' + note + landed + ' |');
   });
   lines.push('');
   return lines.join('\n');
@@ -274,7 +316,8 @@ function save(run, fileSuffix) {
   // 阶段结束时间 + 总耗时（worker 若已打 endedAt 则沿用，否则以落盘时刻补齐）
   // 必须在 summarize 之前算好，summary.totalDurationMs 才能取到值
   if (!run.endedAt) run.endedAt = new Date().toISOString();
-  if (run.durationMs == null && run.startedAt) {
+  // 总耗时始终按 startedAt → endedAt 真实墙钟重算（修复：中途增量落盘曾把耗时固化为首节点耗时）
+  if (run.startedAt) {
     const parsed = Date.parse(run.endedAt) - Date.parse(run.startedAt);
     run.durationMs = parsed > 0 ? parsed : 0;
   }
@@ -302,7 +345,7 @@ function save(run, fileSuffix) {
           arr = [];
         }
       }
-      arr.push({
+      const entry = {
         taskId: run.taskId,
         platform: run.platform || null,
         startedAt: run.startedAt,
@@ -315,7 +358,11 @@ function save(run, fileSuffix) {
         clientId: run.clientId,
         vpn: run.vpn || null,
         summary: run.summary,
-      });
+      };
+      // 按 taskId|platform 覆盖式更新（upsert），避免重复任务/每节点增量快照把滚动汇总灌满冗余记录
+      const key = (run.taskId || '') + '|' + (run.platform || '');
+      const existIdx = arr.findIndex(r => ((r.taskId || '') + '|' + (r.platform || '')) === key);
+      if (existIdx >= 0) arr[existIdx] = entry; else arr.push(entry);
       if (arr.length > 200) arr = arr.slice(-200);
       atomicWriteSync(rollingFile, JSON.stringify(arr, null, 2));
     } catch (e) {

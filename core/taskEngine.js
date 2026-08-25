@@ -92,7 +92,19 @@ class TaskEngine {
     this.config = config;
     this.emit = typeof emit === 'function' ? emit : () => {};
     this.adapters = {
-      baidu: new BaiduAdapter(),
+      baidu: new BaiduAdapter({
+        // 百度适配器：命中安全验证（验证码）页时回调置位 captchaHit，
+        // 让 worker 写入 perWifi.captcha，统计如实反映「真实触发频次」而非只记失败路径。
+        onCaptcha: (detail) => {
+          this.captchaHit = true;
+        },
+        // 把任务级 humanize 配置透传给百度适配器，使其在「等框→填词→提交」之间
+        // 也能插入随机停顿，而不是只在目标站内停留阶段才拟人。
+        humanize: (config && config.humanize) || {},
+        // 中断信号：把 () => this.shouldStop 注入百度适配器，使其验证码等待轮询
+        // 能在 /api/task/stop 到达时（每 2s 轮询点）立即抛出，从而快速终止卡死任务。
+        shouldAbort: () => this.shouldStop,
+      }),
       // 谷歌适配器：命中验证码/异常流量拦截时（即使随后自动恢复）回调置位 captchaHit，
       // 让 worker 写入 perWifi.captcha，统计如实反映「真实触发频次」而非只记失败路径。
       google: new GoogleAdapter({
@@ -215,6 +227,9 @@ class TaskEngine {
     // 分阶段「按节点轮询」时 worker 注入 disableCircuitBreak:true，关闭引擎级熔断
     // （单轮失败交由 worker 重试/补跑，不在此误报「任务已熔断终止」）。
     this.circuitBreakEnabled = !opts.disableCircuitBreak;
+    // captchaHit 按「节点」粒度复位一次：eng 实例由 worker 每节点新建，此处复位确保
+    // 跨节点不串味；节点内多关键词轮次间保持 OR 累积（不在 runRound 每轮复位）。
+    this.captchaHit = false;
 
     const session = new BrowserSession();
     this.session = session; // 必须挂到 this，供 _relaunch 重拉浏览器时使用
@@ -260,7 +275,16 @@ class TaskEngine {
           await sleep(randInt(irMin, Math.max(irMin, irMax)));
         }
 
-        await this.runRound(plan);
+        try {
+          await this.runRound(plan);
+        } catch (roundErr) {
+          // 轮次内异常（含百度验证码轮询被 stop 中断抛出的 ABORTED）：
+          // 已请求停止/暂停则转为对应终态并退出；否则保守计入失败、继续下一轮，避免整任务卡死。
+          if (this.shouldStop) { finalStatus = TaskStatus.STOPPED; break; }
+          if (this.shouldPause) { finalStatus = TaskStatus.PAUSED; break; }
+          this.failCount += 1;
+          console.error('[eng] 轮次异常（已计入失败，继续下一轮）: ' + ((roundErr && roundErr.message) || roundErr));
+        }
 
         // 熔断检查（决策 A4）
         this._maybeCircuitBreak();
@@ -482,12 +506,16 @@ class TaskEngine {
   async runRound(plan) {
     const taskId = this.config.taskId;
 
-    // 每轮复位验证码命中标记与上报护栏：captchaHit 仅代表「本轮」是否触发，
-    // 避免上一轮置位后串味到后续节点（旧实现在构造函数只复位一次，会导致
-    // 一旦某轮命中、全任务所有节点都被误记为 captcha）。
-    this.captchaHit = false;
+    // 每轮仅复位「适配器级上报护栏」（幂等标记），允许本轮重新触发 onCaptcha 上报。
+    // 注意：engine.captchaHit 不再每轮复位——它代表「本节点（eng 实例，由 worker
+    // 每节点新建）是否命中过验证码」，需在多关键词轮次间做 OR 累积。eng 实例由 worker
+    // 按节点新建（构造函数已置 false），天然不串味到后续节点；若在此每轮复位，会清掉
+    // 前一轮已命中的验证码（风控通常卡在首轮），导致漏记（见任务 989c32d0 复盘）。
     if (this.adapters && this.adapters.google && this.adapters.google.resetCaptchaNotify) {
       this.adapters.google.resetCaptchaNotify();
+    }
+    if (this.adapters && this.adapters.baidu && this.adapters.baidu.resetCaptchaNotify) {
+      this.adapters.baidu.resetCaptchaNotify();
     }
 
     // 切入该轮前，确保浏览器网络与该平台匹配（百度无代理 / 谷歌走 VPN 出口）。
@@ -554,10 +582,12 @@ class TaskEngine {
     this.emit(P.makeProgress({ taskId, type: EventType.ROUND_START, round, stats: this._makeStats() }));
 
     try {
-      // --- 1. SEARCH（打开 + 输入 + 提交）---
+      // --- 1. SEARCH（打开 + 拟人停顿 + 输入 + 提交）---
       const searchStep = await this._runStep(StepName.SEARCH, async () => {
         const adapter = this.adapters[plan.platform];
         await adapter.open(page);
+        // 打开搜索首页后、输入关键词前，先做一次拟人停顿/微动作，降低被风控识别为机器人的概率
+        await this._betweenSteps(page, round, taskId);
         await adapter.search(page, plan.keyword);
       });
       this.emit(P.makeProgress({ taskId, type: EventType.STEP, round, step: searchStep, stats: this._makeStats() }));
@@ -615,6 +645,9 @@ class TaskEngine {
         } else {
           // 关键成功信号：ENTER 成功落地目标站
           this.enteredTarget = true;
+          // BUGFIX：landedUrl 此前在 LOCATE 阶段写入（仅「找到的链接」），不能代表真正进去。
+          // 此处用 ENTER 后的真实落地地址覆盖，使统计/日志反映实际落地页。
+          try { this.landedUrl = page.url() || this.landedUrl; } catch (e) { /* ignore */ }
         }
 
         // 步骤间拟人微动作（enter → stay）

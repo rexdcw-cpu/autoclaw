@@ -220,7 +220,7 @@ class BrowserSession {
     // 才退回 context.browser()，绝对避免直接 context.close()（持久化上下文会挂起）。
     const b = this.browser || (this.context && this.context.browser && this.context.browser());
     const proc = b && b.process && b.process();
-    console.error(tag, '开始关闭 browser=' + (!!b) + ' proc=' + (proc && proc.pid));
+    if (!b) console.error(tag, '无 browser 引用，跳过主关闭（疑似异常会话）');
     const closePromise = b ? b.close() : Promise.resolve();
     // 主关闭：10s 兜底超时，避免任务 finally 卡死（异步挂起时 race 在 10s 返回）
     try {
@@ -229,7 +229,6 @@ class BrowserSession {
         new Promise((resolve) => setTimeout(resolve, 10000)),
       ]);
     } catch (_) {}
-    console.error(tag, 'browser.close 阶段完成');
     // 兜底强杀：browser.close() 已返回但 Chrome 进程树可能仍残留并占用 profile 锁，
     // 显式杀进程树确保锁释放。先 SIGKILL（Node 原生，不依赖 taskkill 系统工具），
     // 再 taskkill /T 兜底（加 8s 超时，被策略拦截时抛错被吞，不阻塞）。
@@ -253,7 +252,6 @@ class BrowserSession {
     this.context = null;
     this.browser = null;
     this._userDataDir = null;
-    console.error(tag, '关闭完成');
   }
 }
 

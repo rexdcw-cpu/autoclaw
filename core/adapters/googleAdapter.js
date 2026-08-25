@@ -104,7 +104,9 @@ const STEP_TIMEOUT = {
  * 命中谷歌异常流量拦截（google.com/sorry）时进入轮询，等待用户在可见 Chrome
  * 窗口手动过码；轮询耗尽抛 ERR_GOOGLE_CAPTCHA。
  */
-const CAPTCHA_WAIT_MS = 120000;
+// 验证码人工等待上限：Session 0 非交互环境无法手动过码，过长只是卡死；
+// 默认 30s 足够判定并放弃当前节点，可用 AUTOCLAW_CAPTCHA_WAIT_MS 覆盖（如需人工过码可设大）。
+const CAPTCHA_WAIT_MS = parseInt(process.env.AUTOCLAW_CAPTCHA_WAIT_MS, 10) || 30000;
 const CAPTCHA_POLL_INTERVAL = 2000;
 
 /** 同意页点击后等待离开的最长时间（毫秒） */
@@ -757,10 +759,15 @@ class GoogleAdapter extends PlatformAdapter {
       const nextUrl = /^https?:/i.test(nextHref)
         ? nextHref
         : new URL(nextHref, page.url()).toString();
+      // 拟人停顿：翻页前模拟真人「看完本页未命中 → 决定翻页」的思考停顿 + 鼠标微动，
+      // 打断连续 goto，避免被 Google 风控判定为机器人快速翻页（此前翻页无任何停顿）。
+      await this._humanDelay(page);
       await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
       await page
         .waitForSelector('#rso', { state: 'visible', timeout: 15000 })
         .catch(() => {});
+      // 拟人停顿：翻页后模拟真人浏览新页结果的停顿，进一步拉平请求节奏。
+      await this._humanDelay(page);
       // 翻页后可能落到验证/同意页：重新检测并抛出明确错误，避免被误判为「0 外链」
       if (await this._isCaptchaPage(page)) {
         throw new Error('谷歌验证拦截（ERR_GOOGLE_CAPTCHA）：翻页后命中异常流量验证页，结果页未加载');
@@ -814,7 +821,21 @@ class GoogleAdapter extends PlatformAdapter {
 
   /** 跳转进入目标站点 */
   async clickTarget(page, href) {
-    await page.goto(href, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // 与 baiduAdapter 一致：goto 后等待目标站真正可交互（body 含可见文本），并放宽总超时；
+    // 超时抛明确错误（含最终落地 URL），便于日志定位「ENTER 跳转目标站超时」。
+    let finalUrl = href;
+    try {
+      await page.goto(href, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    } catch (e) {
+      try { finalUrl = page.url(); } catch (_) { /* ignore */ }
+      throw new Error('ENTER 跳转目标站超时/失败（' + (e && e.message ? String(e.message).split('\n')[0] : e) + '）最终地址=' + finalUrl);
+    }
+    try { finalUrl = page.url(); } catch (_) { /* ignore */ }
+    await page.waitForFunction(
+      () => { const b = document.body; return !!b && b.innerText && b.innerText.trim().length > 0; },
+      { timeout: 15000 }
+    ).catch(() => { /* 超时仅告警：部分站 body 始终空（纯图/canvas），已落地即算成功 */ });
+    return finalUrl;
   }
 }
 

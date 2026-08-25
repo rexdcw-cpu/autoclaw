@@ -60,6 +60,12 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** 毫秒格式化为紧凑时长串，如 2m23s / 143s，用于节点级进度日志 */
+function fmtDur(ms) {
+  const s = Math.max(0, Math.round((ms || 0) / 1000));
+  return s >= 60 ? (Math.floor(s / 60) + 'm' + (s % 60) + 's') : (s + 's');
+}
+
 /** 失败重试前的短暂停顿（毫秒）；可通过 AUTOCLAW_WIFI_RETRY_GAP_MS 覆盖 */
 const RETRY_GAP_MS = parseInt(process.env.AUTOCLAW_WIFI_RETRY_GAP_MS, 10) || 2000;
 /** WiFi 切换失败后的应用层重试次数（缓解偶发竞争/瞬时失败，如紧挨切网时 WlanConnect 竞争）；可用 AUTOCLAW_WIFI_SWITCH_RETRY 覆盖 */
@@ -428,6 +434,9 @@ async function runPhased(config, emit, deps) {
       let successCount = 0;
       let firstSuccessNode = null;
       let pollIndex = 0;
+      // 谷歌验证码累计止损：累计 N 个「失败且命中验证码」节点即跳剩余 VPN 节点，
+      // 避免整轮被验证逐个卡死（百度已有 BAIDU_CAPTCHA_ABORT_THRESHOLD，谷歌此前缺失）。
+      let gCaptchaNodeCount = 0;
       // 节点内重试：单个节点 FAILED（动作超时 / VPN 抖动 / 区域化解析失败等瞬时故障）后，
       // 在该节点上重跑 AUTOCLAW_GOOGLE_NODE_RETRIES 次（默认 2，共最多 3 次尝试），任一次成功即计入；
       // 全失败才丢弃，避免 VPN 节点瞬时抖动被直接判死、拉低整体完成率。
@@ -435,6 +444,8 @@ async function runPhased(config, emit, deps) {
       // 谷歌专用单动作超时（默认 60s，远低于全局 150s）：死节点更快超时、更快进入重试，
       // 不影响验证码轮询（谷歌验证码等待用独立 CAPTCHA_POLL_INTERVAL 循环，不依赖 actionTimeoutMs）。
       const googleTimeoutMs = Number(process.env.AUTOCLAW_GOOGLE_ACTION_TIMEOUT) || 60000;
+      // 谷歌验证码止损阈值：累计 N 个「失败且命中验证码」节点即跳过剩余（默认 3，env 可配）。
+      const GOOGLE_CAPTCHA_ABORT_THRESHOLD = parseInt(process.env.AUTOCLAW_GOOGLE_CAPTCHA_ABORT, 10) || 3;
 
       while (successCount < targetCount && pool.length > 0) {
         const node = pool.shift();
@@ -457,6 +468,7 @@ async function runPhased(config, emit, deps) {
           // 节点内重试循环：该节点最多尝试 nodeRetries+1 次（含首次），任一次成功即停。
           let st = TaskStatus.FAILED;
           let nodeErr = null;
+          let nodeCaptcha = false; // 节点级累积：任一次尝试命中验证码即记 true（修复「验证码在失败重试里触发、成功在另一次尝试」导致漏记）
           while (nodeAttempt <= nodeRetries) {
           nodeAttempt += 1;
           // 给谷歌单独注入更短的单动作超时（不影响百度 150s 验证码余量）。
@@ -482,6 +494,7 @@ async function runPhased(config, emit, deps) {
           const stRun = await eng.run(googleRounds, { vpnPreset: preset, disableCircuitBreak: true });
           gT1 = Date.now();
           st = stRun;
+          nodeCaptcha = nodeCaptcha || !!(eng && eng.captchaHit);
           nodeErr = (eng && eng.lastErrorDetail) ? eng.lastErrorDetail : String(stRun);
           if (st === TaskStatus.COMPLETED) break;            // 成功即停
           if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) break; // 控制态不重试
@@ -497,12 +510,17 @@ async function runPhased(config, emit, deps) {
           startedAt: new Date(gT0).toISOString(), endedAt: new Date(gT1).toISOString(),
           durationMs: Math.max(0, gT1 - gT0),
           found: !!(engine && engine.foundTarget),
+          entered: !!(engine && engine.enteredTarget),
           landedUrl: engine ? engine.landedUrl || null : null,
-          captcha: !!(engine && engine.captchaHit),
+          captcha: nodeCaptcha,
           error: st === TaskStatus.COMPLETED
             ? null
             : nodeErr,
         });
+        console.error('[worker][节点] 谷歌 ' + pollIndex + '/' + targetCount + ' 『' + node + '』 ' + recStatus +
+          ' 命中' + (st === TaskStatus.COMPLETED ? '✅' : '❌') + ' ' + fmtDur(gT1 - gT0) + ' 尝试' + nodeAttempt +
+          ' 验证码' + (nodeCaptcha ? '有' : '无') +
+          (st !== TaskStatus.COMPLETED ? ' err=' + nodeErr : ''));
         if (st === TaskStatus.COMPLETED) {
           successCount += 1;
           if (!firstSuccessNode) firstSuccessNode = node;
@@ -511,6 +529,17 @@ async function runPhased(config, emit, deps) {
         if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) {
           finalStatus = st;
           break;
+        }
+        // 谷歌验证码累计止损：累计 N 个「失败且命中验证码」节点即跳剩余 VPN 节点，
+        // 避免整轮被验证逐个卡死（百度已有对应阈值，谷歌此前缺失）。
+        if (st !== TaskStatus.COMPLETED && nodeCaptcha) gCaptchaNodeCount += 1;
+        if (gCaptchaNodeCount >= GOOGLE_CAPTCHA_ABORT_THRESHOLD) {
+          emit(P.makeProgress({
+            taskId: config.taskId,
+            type: EventType.ALERT,
+            message: '【谷歌阶段】累计 ' + gCaptchaNodeCount + ' 个节点命中谷歌验证拦截，当前出口 IP 大概率被标记，跳过剩余 ' + pool.length + ' 个 VPN 节点',
+          }));
+          break; // 跳出外层 while（逐节点补跑循环）
         }
         } catch (nodeRunErr) {
           // 单节点执行异常（含浏览器原生崩溃 / 启动失败 / 超时）：记录为失败并继续换下一个备选节点补跑，
@@ -524,6 +553,9 @@ async function runPhased(config, emit, deps) {
             found: false, landedUrl: null, captcha: false,
             error: nodeRunErr && nodeRunErr.message ? nodeRunErr.message : String(nodeRunErr),
           });
+          console.error('[worker][节点] 谷歌 ' + pollIndex + '/' + targetCount + ' 『' + node + '』 failed 命中❌ ' +
+            fmtDur(gT0 ? (Date.now() - gT0) : 0) + ' 尝试' + nodeAttempt + ' 验证码无 err=' +
+            (nodeRunErr && nodeRunErr.message ? nodeRunErr.message : String(nodeRunErr)));
           emit(P.makeProgress({
             taskId: config.taskId,
             type: EventType.ALERT,
@@ -531,7 +563,8 @@ async function runPhased(config, emit, deps) {
           }));
         }
         // 每节点后增量落盘 google 统计，确保中途崩溃也能保留已完成节点的成果
-        try { statsMod.save(run, 'google'); } catch (_) {}
+        // 落盘前刷新 endedAt，使快照耗时基于真实墙钟（而非首节点结束时刻），与 taskStats.js 重算逻辑配合
+        try { run.endedAt = new Date().toISOString(); statsMod.save(run, 'google'); } catch (_) {}
       }
 
       // 补跑模型下的整阶段终态判定：
@@ -600,11 +633,25 @@ async function runPhased(config, emit, deps) {
 /** 百度阶段：按 WiFi 序列循环跑百度流程（含单 WiFi 内失败重试） */
 async function runBaiduLoop(config, baiduRounds, seq, deps) {
   const { wm, makeEngine, wait, retryWait, MAX_RETRIES, emit, run, statsMod } = deps;
+  // 百度验证码累计止损阈值：同一出口 IP 一旦被百度风控，逐 WIFI 节点轮询必空耗数小时
+  // （每个节点失败 4 次 × 120s 验证码轮询）。累计 N 个「失败且命中验证码」的节点即判定
+  // 当前网络无望，跳过剩余 WIFI 节点，避免任务长期挂死。可用 env AUTOCLAW_BAIDU_CAPTCHA_ABORT 调整。
+  const BAIDU_CAPTCHA_ABORT_THRESHOLD = parseInt(process.env.AUTOCLAW_BAIDU_CAPTCHA_ABORT, 10) || 3;
   let finalStatus = TaskStatus.COMPLETED;
+  let captchaNodeCount = 0;
 
   for (let i = 0; i < seq.length; i += 1) {
     const ssid = seq[i];
     if (abort) { finalStatus = abortStatus; break; }
+    // 百度验证码累计止损：累计 N 个「失败且命中验证码」节点即跳过剩余 WIFI（见阈值常量说明）
+    if (captchaNodeCount >= BAIDU_CAPTCHA_ABORT_THRESHOLD) {
+      emit(P.makeProgress({
+        taskId: config.taskId, type: EventType.WIFI_POLL,
+        message: '【百度阶段】累计 ' + captchaNodeCount + ' 个节点命中百度安全验证，当前网络/出口大概率被风控，跳过剩余 ' + (seq.length - i) + ' 个 WIFI 节点',
+        wifiIndex: i + 1, wifiTotal: seq.length, ssid: '',
+      }));
+      break;
+    }
     if (i > 0 || (i === 0 && ssid && (await wm.getCurrentSsid()) !== ssid)) {
       if (ssid) {
         // 切换 WiFi 带重试：缓解偶发竞争 / 瞬时失败（如 ROSNET19 曾因紧挨上一网切换竞争被直接 skipped）。
@@ -636,6 +683,7 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
             durationMs: 0,
             error: '切换失败：' + cr.message,
           });
+          console.error('[worker][节点] 百度 ' + (i + 1) + '/' + seq.length + ' 『' + ssid + '』 skipped 命中— 0ms 尝试0 err=切换失败：' + cr.message);
           continue;
         }
         await wait(5000);
@@ -653,6 +701,7 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
       }));
     }
 
+    let nodeCaptcha = false; // 节点级：任一重试尝试命中验证码即记 true（修复 perWifi.captcha 漏记）
     let attempts = 0;
     let terminal = TaskStatus.FAILED;
     let ok = false;
@@ -663,6 +712,7 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
       const eng = makeEngine(config, emit);
       engine = eng;
       const st = await eng.run(baiduRounds, { disableCircuitBreak: true });
+      nodeCaptcha = nodeCaptcha || !!(eng && eng.captchaHit);
       if (st === TaskStatus.PAUSED || st === TaskStatus.STOPPED) {
         terminal = st; controlBreak = true; break;
       }
@@ -681,15 +731,28 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
     const attT1 = Date.now();
 
     const recStatus = ok ? 'completed' : (terminal === TaskStatus.FAILED ? 'failed' : terminal);
+    // 可观测性：优先用引擎记录的最后失败步骤+错误详情（含步骤名，如「ENTER 跳转目标站超时…」），
+    // 不再写死「流程连续失败 N 次」，便于日志直接定位卡点。
+    const lastErr = (engine && engine.lastErrorDetail) ? String(engine.lastErrorDetail) : null;
+    const failedStep = lastErr ? lastErr.split(/[：:]/)[0].slice(0, 48) : null;
     statsMod.recordWifi(run, {
       ssid: ssid || null, via: 'wifi', status: recStatus,
       attempts: attempts, retriesUsed: Math.max(0, attempts - 1),
       startedAt: new Date(attT0).toISOString(), endedAt: new Date(attT1).toISOString(),
       durationMs: Math.max(0, attT1 - attT0),
       found: !!(engine && engine.foundTarget),
+      entered: !!(engine && engine.enteredTarget),
+      captcha: nodeCaptcha,
       landedUrl: engine ? engine.landedUrl || null : null,
-      error: ok ? null : (terminal === TaskStatus.FAILED ? '流程连续失败 ' + attempts + ' 次' : terminal),
+      failedStep: failedStep,
+      error: ok ? null : (lastErr || ('流程连续失败 ' + attempts + ' 次')),
     });
+    console.error('[worker][节点] 百度 ' + (i + 1) + '/' + seq.length + ' 『' + (ssid || '当前网络') + '』 ' + recStatus +
+      ' 命中' + (ok || (engine && engine.foundTarget) ? '✅' : '❌') + ' 落地' + ((engine && engine.enteredTarget) ? '✅' : '❌') + ' ' + fmtDur(attT1 - attT0) + ' 尝试' + attempts +
+      (recStatus !== 'completed' ? ' err=' + (lastErr || (terminal === TaskStatus.FAILED ? ('流程连续失败' + attempts + '次') : terminal)) : ''));
+
+    // 仅「失败且命中验证码」的节点计入止损阈值（成功节点即便曾触发验证码也不计入，避免误判）
+    if (!ok && nodeCaptcha) captchaNodeCount += 1;
 
     if (controlBreak) { finalStatus = terminal; break; }
     if (!ok && terminal === TaskStatus.FAILED) {
@@ -835,6 +898,7 @@ async function runLegacy(config, emit, deps) {
     }
     const attT1 = Date.now();
 
+    const lastErrLegacy = (engine && engine.lastErrorDetail) ? String(engine.lastErrorDetail) : null;
     statsMod.recordWifi(run, {
       ssid: ssid || null,
       status: ok ? 'completed' : (terminal === TaskStatus.FAILED ? 'failed' : terminal),
@@ -842,7 +906,12 @@ async function runLegacy(config, emit, deps) {
       retriesUsed: Math.max(0, attempts - 1),
       startedAt: new Date(attT0).toISOString(), endedAt: new Date(attT1).toISOString(),
       durationMs: Math.max(0, attT1 - attT0),
-      error: ok ? null : (terminal === TaskStatus.FAILED ? '流程连续失败 ' + attempts + ' 次（含 ' + MAX_RETRIES + ' 次重试）' : terminal),
+      found: !!(engine && engine.foundTarget),
+      entered: !!(engine && engine.enteredTarget),
+      captcha: !!(engine && engine.captchaHit),
+      landedUrl: engine ? engine.landedUrl || null : null,
+      failedStep: lastErrLegacy ? lastErrLegacy.split(/[：:]/)[0].slice(0, 48) : null,
+      error: ok ? null : (lastErrLegacy || (terminal === TaskStatus.FAILED ? '流程连续失败 ' + attempts + ' 次（含 ' + MAX_RETRIES + ' 次重试）' : terminal)),
     });
 
     if (controlBreak) { finalStatus = terminal; break; }

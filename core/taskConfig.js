@@ -187,7 +187,7 @@ function sanitizeHumanize(raw) {
   const out = {};
   if (!raw || typeof raw !== 'object') return out;
   if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
-  const nums = ['minMs', 'maxMs', 'jitterAmp', 'moveProb', 'scrollProb', 'hoverProb', 'wheelAmp'];
+  const nums = ['minMs', 'maxMs', 'jitterAmp', 'moveProb', 'scrollProb', 'hoverProb', 'wheelAmp', 'typeDelayMin', 'typeDelayMax'];
   for (const k of nums) {
     const v = Number(raw[k]);
     if (Number.isFinite(v) && raw[k] !== '' && raw[k] != null) out[k] = v;

@@ -69,7 +69,9 @@ const STEP_TIMEOUT = {
  * 命中百度安全验证（风控验证码页）时进入轮询，等待用户在可见 Chrome 窗口
  * 手动过码后继续；轮询耗尽则抛出 ERR_BAIDU_CAPTCHA。
  */
-const CAPTCHA_WAIT_MS = 120000;
+// 验证码人工等待上限：Session 0 非交互环境无法手动过码，过长只是卡死；
+// 默认 30s 足够判定并放弃当前节点，可用 AUTOCLAW_CAPTCHA_WAIT_MS 覆盖（如需人工过码可设大）。
+const CAPTCHA_WAIT_MS = parseInt(process.env.AUTOCLAW_CAPTCHA_WAIT_MS, 10) || 30000;
 const CAPTCHA_POLL_INTERVAL = 2000;
 
 /**
@@ -79,8 +81,70 @@ const CAPTCHA_POLL_INTERVAL = 2000;
 const MAX_RESULT_PAGES = 5;
 
 class BaiduAdapter extends PlatformAdapter {
-  constructor() {
+  constructor(opts) {
     super('baidu');
+    this._onCaptcha = (opts && opts.onCaptcha) || null;
+    // 本轮「是否已上报过验证码事件」的护栏：同一轮内只上报一次，避免轮询里每 2s 重复上报。
+    this._captchaNotified = false;
+    // 拟人微动作配置：在搜索框输入/提交等关键动作之间插入随机停顿，降低百度风控概率
+    this.humanize = (opts && opts.humanize) || null;
+    // 中断检查：由 taskEngine 注入 () => this.shouldStop，使验证码等待轮询能在
+    // /api/task/stop 到达时（每 2s 轮询点）立即抛错，避免任务卡死无法终止。
+    this._shouldAbort = (opts && opts.shouldAbort) || null;
+  }
+
+  /**
+   * 搜索页关键动作之间的拟人停顿。
+   * 停顿期间额外做一次「可信鼠标微动」，让停顿看起来是人在操作而非脚本死等。
+   * 任何异常静默吞掉，绝不影响主流程。
+   * @param {import('playwright').Page} [page] 可选；传入则附真实鼠标微动
+   */
+  async _humanDelay(page) {
+    const h = this.humanize || {};
+    if (h.enabled === false) return;
+    const minMs = h.minMs != null ? h.minMs : 800;
+    const maxMs = h.maxMs != null ? h.maxMs : 2600;
+    const jitterAmp = h.jitterAmp != null ? h.jitterAmp : 400;
+    const thinkMs = Math.floor(minMs + Math.random() * (maxMs - minMs)) + (jitterAmp ? Math.floor(Math.random() * jitterAmp) : 0);
+    try {
+      await new Promise((r) => setTimeout(r, thinkMs));
+      // 停顿期间做一次可信鼠标微动：基于视口随机坐标、多步缓动，模拟真人手部微动。
+      if (page && typeof page.mouse !== 'undefined') {
+        try {
+          const vp = page.viewportSize && page.viewportSize();
+          if (vp && vp.width && vp.height) {
+            const x = Math.floor(Math.random() * vp.width);
+            const y = Math.floor(Math.random() * vp.height);
+            await page.mouse.move(x, y, { steps: 3 + Math.floor(Math.random() * 5) });
+          }
+        } catch (e) {
+          /* 鼠标微动失败不影响主流程 */
+        }
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  /**
+   * 命中百度安全验证（风控验证码页）时上报一次（幂等：同一轮只上报一次）。
+   * @param {string} reason 触发原因（验证码页 URL / 文案片段）
+   */
+  _notifyCaptcha(reason) {
+    if (this._captchaNotified) return;
+    this._captchaNotified = true;
+    if (this._onCaptcha) {
+      try {
+        this._onCaptcha(reason || '百度安全验证拦截页');
+      } catch (e) {
+        /* 回调异常不影响主流程 */
+      }
+    }
+  }
+
+  /** 每轮开始时由调用方（taskEngine）调用，重置上报护栏 */
+  resetCaptchaNotify() {
+    this._captchaNotified = false;
   }
 
   /**
@@ -157,9 +221,15 @@ class BaiduAdapter extends PlatformAdapter {
 
         // 先判断是否落在百度安全验证（验证码）页：多 round 复用同一 profile 时易触发。
         if (await this._isCaptchaPage(page)) {
+          // 命中验证码页：上报一次（供统计），保留可操作提示
+          this._notifyCaptcha('百度安全验证拦截页');
           // 轮询等待用户手动过码：上限 CAPTCHA_WAIT_MS、间隔 CAPTCHA_POLL_INTERVAL
           let elapsed = 0;
           while (elapsed < CAPTCHA_WAIT_MS) {
+            // 中断检查：stop 信号到达时立即抛错，让 taskEngine.run 在轮次边界快速返回 STOPPED
+            if (this._shouldAbort && this._shouldAbort()) {
+              throw new Error('百度操作被中断（ABORTED）');
+            }
             console.warn(
               '百度安全验证拦截：请在弹出的 Chrome 窗口中手动完成验证，程序将在验证通过后自动继续'
             );
@@ -202,23 +272,57 @@ class BaiduAdapter extends PlatformAdapter {
       });
     });
 
-    // 步骤B：填写搜索词。
-    // BUGFIX：fill() 要求元素可见可编辑，#kw 被解析为 hidden 时直接失败。
-    // 改用 page.evaluate 直接对 input 赋原生 value 并派发 input/change 事件，
-    // 既绕开可见性限制，又能正确触发百度搜索框的监听逻辑（对隐藏/可见态均生效）。
+    // 拟人停顿：搜索框出现后、输入关键词前，模拟用户阅读/定位输入框的时间
+    await this._humanDelay(page);
+
+    // 步骤B：填写搜索词（拟人化可信键入，关键修复）。
+    // 旧实现用 page.evaluate 的 prototype setter 一次性灌满整个关键词，产生的是
+    // isTrusted=false 的不可信事件，且值瞬间跳变 —— 这是百度风控最敏感的 bot 特征。
+    // 现改为 page.keyboard.type：经 CDP 注入 isTrusted=true 的可信键入事件，逐字符带
+    // 随机间隔（typeDelayMin/Max），模拟真人打字节奏。#kw 偶发 hidden 时聚焦/键入可能
+    // 失效，故键入后校验实际落入情况，失败则回退原 evaluate setter 保底，确保不卡死。
     await this._withStep('填写搜索词', '填写搜索词超时', async () => {
-      await page.evaluate((kw) => {
-        const el = document.querySelector('#kw');
-        if (!el) throw new Error('#kw not found');
-        const setter = Object.getOwnPropertyDescriptor(
-          window.HTMLInputElement.prototype,
-          'value'
-        ).set;
-        setter.call(el, kw);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }, keyword);
+      const h = this.humanize || {};
+      const tMin = h.typeDelayMin != null ? h.typeDelayMin : 60;
+      const tMax = h.typeDelayMax != null ? h.typeDelayMax : 200;
+      let ok = false;
+      try {
+        // 聚焦输入框（hidden 时为 no-op，不影响后续校验回退）
+        await page.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          if (el) el.focus();
+        }, SEARCH_BOX);
+        // 可信逐字符键入：中文经 Input.insertText、ASCII 经真实按键，均为 isTrusted=true
+        await page.keyboard.type(keyword, { delay: Math.floor(tMin + Math.random() * (tMax - tMin)) });
+        // 校验：至少前半段关键词已落入输入框
+        const val = await page.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          return el ? el.value : '';
+        }, SEARCH_BOX);
+        const probe = keyword.slice(0, Math.max(1, Math.ceil(keyword.length / 2)));
+        if (val && val.indexOf(probe) !== -1) ok = true;
+      } catch (e) {
+        ok = false;
+      }
+      if (!ok) {
+        // 保底：原 evaluate setter 灌值（兼容 hidden #kw）。出现此 warn 说明可信键入未生效。
+        console.warn('[baidu] 可信逐字符键入未生效，已回退 evaluate 灌值（关键词=' + keyword + '）');
+        await page.evaluate((kw) => {
+          const el = document.querySelector('#kw');
+          if (!el) throw new Error('#kw not found');
+          const setter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype,
+            'value'
+          ).set;
+          setter.call(el, kw);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }, keyword);
+      }
     });
+
+    // 拟人停顿：输入搜索词后、提交前，模拟用户确认/思考的时间
+    await this._humanDelay(page);
 
     // 步骤C：提交搜索。
     // BUGFIX：press(#kw, 'Enter') 同样依赖输入框可见/可聚焦，hidden 时失败。
@@ -249,6 +353,10 @@ class BaiduAdapter extends PlatformAdapter {
     // 轮询上限 CAPTCHA_WAIT_MS（模块级常量，open/search 共用），超过仍无结果则抛 ERR_BAIDU_CAPTCHA。
     let elapsed = 0;
     while (elapsed < CAPTCHA_WAIT_MS) {
+      // 中断检查：stop 信号到达时立即抛错，让 taskEngine.run 在轮次边界快速返回 STOPPED
+      if (this._shouldAbort && this._shouldAbort()) {
+        throw new Error('百度操作被中断（ABORTED）');
+      }
       let hasResults = false;
       try {
         await page.waitForSelector('#content_left', {
@@ -262,7 +370,8 @@ class BaiduAdapter extends PlatformAdapter {
       if (hasResults) break; // 结果页已出现，搜索成功
 
       if (await this._isCaptchaPage(page)) {
-        // 清晰可操作提示：用户在弹出的 Chrome 窗口中手动完成验证，程序自动继续
+        // 命中验证码页：上报一次（供统计），保留可操作提示
+        this._notifyCaptcha('百度安全验证拦截页');
         console.warn(
           '百度安全验证拦截：请在弹出的 Chrome 窗口中手动完成验证，程序将在验证通过后自动继续'
         );
@@ -341,9 +450,14 @@ class BaiduAdapter extends PlatformAdapter {
         if (!a) continue;
         const title = ((await a.textContent()) || '').toString();
         const href = (await safeAttr(a, 'href')) || '';
-        const mu = (await safeAttr(item, 'mu')) || '';
-        const dataUrl = (await safeAttr(item, 'data-url')) || '';
-        const realUrl = mu || dataUrl;
+        // 真实 URL 声明可能出现在「容器」或「链接」元素上（不同结果布局差异），
+        // 多来源取第一个有效 http(s) 作为真实地址，最大限度避免回退到跳转链解析。
+        const muItem = (await safeAttr(item, 'mu')) || '';
+        const muLink = (await safeAttr(a, 'mu')) || '';
+        const dItem = (await safeAttr(item, 'data-url')) || '';
+        const dLink = (await safeAttr(a, 'data-url')) || '';
+        const realUrl =
+          [muItem, muLink, dItem, dLink].find((u) => /^https?:\/\//i.test(u || '')) || '';
         parsed.push({ title, href, realUrl });
       }
 
@@ -376,10 +490,15 @@ class BaiduAdapter extends PlatformAdapter {
       const nextUrl = /^https?:/i.test(nextHref)
         ? nextHref
         : new URL(nextHref, page.url()).toString();
+      // 拟人停顿：翻页前模拟真人「看完本页未命中 → 决定翻页」的思考停顿 + 鼠标微动，
+      // 打断连续 goto，避免被百度风控判定为机器人快速翻页（此前翻页无任何停顿）。
+      await this._humanDelay(page);
       await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
       await page
         .waitForSelector('#content_left', { state: 'visible', timeout: 15000 })
         .catch(() => {});
+      // 拟人停顿：翻页后模拟真人浏览新页结果的停顿，进一步拉平请求节奏。
+      await this._humanDelay(page);
     }
 
     // ── 诊断：给出可操作的失败原因，便于快速区分两类问题 ──
@@ -418,7 +537,24 @@ class BaiduAdapter extends PlatformAdapter {
 
   /** 跳转进入目标站点 */
   async clickTarget(page, href) {
-    await page.goto(href, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // BUGFIX：原仅等待 domcontentloaded(30s)。SPA/JS 渲染站或目标站对当前出口 IP 加载慢/被拦时，
+    // domcontentloaded 即返回但页面未就绪，或 30s 超时直接 ENTER 失败。
+    // 改为：goto 后等待目标站真正可交互（body 含可见文本），并放宽总超时；
+    // 超时抛明确错误（含最终落地 URL），便于日志定位「ENTER 跳转目标站超时」。
+    let finalUrl = href;
+    try {
+      await page.goto(href, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    } catch (e) {
+      try { finalUrl = page.url(); } catch (_) { /* ignore */ }
+      throw new Error('ENTER 跳转目标站超时/失败（' + (e && e.message ? String(e.message).split('\n')[0] : e) + '）最终地址=' + finalUrl);
+    }
+    try { finalUrl = page.url(); } catch (_) { /* ignore */ }
+    // 等待页面关键内容就绪（SPA 兜底）：body 出现可见文本即视为落地成功
+    await page.waitForFunction(
+      () => { const b = document.body; return !!b && b.innerText && b.innerText.trim().length > 0; },
+      { timeout: 15000 }
+    ).catch(() => { /* 超时仅告警：部分站 body 始终空（纯图/canvas），已落地即算成功 */ });
+    return finalUrl;
   }
 }
 

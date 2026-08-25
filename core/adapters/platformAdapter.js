@@ -67,6 +67,41 @@ class PlatformAdapter {
   }
 
   /**
+   * 关键动作之间的拟人停顿（基类通用实现；百度/谷歌共用）。
+   * 停顿期间额外做一次「可信鼠标微动」，让停顿看起来是人在操作而非脚本死等。
+   * 任何异常静默吞掉，绝不影响主流程。
+   * @param {import('playwright').Page} [page] 可选；传入则附真实鼠标微动
+   */
+  async _humanDelay(page) {
+    const h = this.humanize || {};
+    if (h.enabled === false) return;
+    const minMs = h.minMs != null ? h.minMs : 800;
+    const maxMs = h.maxMs != null ? h.maxMs : 2600;
+    const jitterAmp = h.jitterAmp != null ? h.jitterAmp : 400;
+    const thinkMs =
+      Math.floor(minMs + Math.random() * (maxMs - minMs)) +
+      (jitterAmp ? Math.floor(Math.random() * jitterAmp) : 0);
+    try {
+      await new Promise((r) => setTimeout(r, thinkMs));
+      // 停顿期间做一次可信鼠标微动：基于视口随机坐标、多步缓动，模拟真人手部微动。
+      if (page && typeof page.mouse !== 'undefined') {
+        try {
+          const vp = page.viewportSize && page.viewportSize();
+          if (vp && vp.width && vp.height) {
+            const x = Math.floor(Math.random() * vp.width);
+            const y = Math.floor(Math.random() * vp.height);
+            await page.mouse.move(x, y, { steps: 3 + Math.floor(Math.random() * 5) });
+          }
+        } catch (e) {
+          /* 鼠标微动失败不影响主流程 */
+        }
+      }
+    } catch (e) {
+      /* 停顿被中断也不影响主流程 */
+    }
+  }
+
+  /**
    * 打开搜索引擎首页。
    * @param {import('playwright').Page} page
    */
@@ -157,19 +192,54 @@ class PlatformAdapter {
    * @param {number} [timeoutMs=3000]
    * @returns {Promise<string>}
    */
-  static async resolveFinalUrl(href, timeoutMs = 3000) {
+  static async resolveFinalUrl(href, timeoutMs = 8000) {
     if (!href || !/^https?:\/\//i.test(href)) return href;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      // 改用 GET（百度对 HEAD 常返回 200 但不跟随跳转）；跟随服务端 302/301 拿到真实落地。
+      // 带浏览器 UA，避免被当自动化客户端直接拦截/返回拦截页。
       const resp = await fetch(href, {
-        method: 'HEAD',
+        method: 'GET',
         redirect: 'follow',
         signal: controller.signal,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+            '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
       });
-      return resp.url || href;
+      let finalUrl = resp.url || href;
+      // 若最终地址仍停在源跳转域（如 baidu.com/link?url= 返回 200 + JS/meta refresh 跳转，
+      // 而非 HTTP 30x），fetch 不会执行 JS，需解析响应体兜底提取真实地址。
+      try {
+        const base = new URL(href);
+        const stillOnSource = (() => {
+          try {
+            return finalUrl === href || new URL(finalUrl).hostname === base.hostname;
+          } catch (e) {
+            return false;
+          }
+        })();
+        if (stillOnSource) {
+          const body = await resp.text();
+          const m =
+            body.match(/location(?:\.href)?\s*=\s*["']([^"']+)["']/i) ||
+            body.match(/location\.replace\(\s*["']([^"']+)["']\s*\)/i) ||
+            body.match(/window\.open\(\s*["']([^"']+)["']/i) ||
+            body.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*url=([^"'>]+)/i);
+          if (m && m[1]) {
+            const cand = m[1].trim().replace(/^["']|["']$/g, '');
+            finalUrl = /^https?:\/\//i.test(cand) ? cand : new URL(cand, base).toString();
+          }
+        }
+      } catch (e) {
+        /* 解析 body 失败则沿用 resp.url */
+      }
+      return finalUrl;
     } catch (e) {
-      // 解析失败（网络/超时/站点拦截）→ 回退原始 href，由 matchHref 兜底判定
+      // 解析失败（网络/超时/站点拦截/重定向循环）→ 回退原始 href，由 matchHref 兜底判定
       return href;
     } finally {
       clearTimeout(timer);
