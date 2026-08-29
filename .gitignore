@@ -34,3 +34,27 @@ _server*.log
 
 # 工具内部记忆/状态（非项目源码）
 .workbuddy/
+
+# ---- v0.3.60 补充 ----
+# worker / 守护日志落盘（data 目录，运行产物不入库）
+data/*.log
+
+# 守护单实例锁与启动探针日志
+data/guardian.lock
+data/startup_*.log
+
+# 一次性诊断 / 监控 / 校验脚本与报告（非源码）
+data/_*.md
+data/_*.js
+data/*_report.md
+
+# 统计产物与临时文件
+data/*.tmp
+data/task-completion-stats.json*.tmp
+
+# 根目录一次性脚本 / 导出 / 日志（下划线前缀约定）
+/_*.txt
+/_*.py
+/_*.json
+/prog.json
+/autoclaw.log
