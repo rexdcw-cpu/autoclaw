@@ -28,8 +28,10 @@ CREATE TABLE IF NOT EXISTS task_config (
   proxy_json         JSON          NULL DEFAULT NULL COMMENT 'F-18 预留，V1 存 NULL',
   created_at         DATETIME      NOT NULL COMMENT '提交时间(UTC)',
   updated_at         DATETIME      NULL DEFAULT NULL COMMENT '状态变更时更新',
+  seq                INT           NULL DEFAULT NULL COMMENT '自增展示编号（应用层 SELECT MAX+1 写入，不改主键）',
   PRIMARY KEY (task_id),
-  KEY idx_created (created_at)
+  KEY idx_created (created_at),
+  UNIQUE KEY uk_seq (seq)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS task_run_log (
@@ -91,4 +93,22 @@ CREATE TABLE IF NOT EXISTS campaigns (
   PRIMARY KEY (id),
   KEY idx_campaigns_next (next_run_at),
   KEY idx_campaigns_enabled (enabled)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 批量任务「每轮执行」历史表（可审计）：每一轮 campaign 跑一次写一条，
+-- 记录起止时间、站点总数/已完成数、终态与中止原因。与 run_state（仅存当前轮、
+-- 重启即清）互补，使每轮整体执行情况可长期留存与复盘。
+CREATE TABLE IF NOT EXISTS campaign_runs (
+  run_id         VARCHAR(36)   NOT NULL,
+  campaign_id    VARCHAR(36)   NOT NULL,
+  campaign_name  VARCHAR(255)  NULL,
+  started_at     BIGINT        NOT NULL,
+  finished_at    BIGINT        NULL,
+  total_sites    INT           NOT NULL DEFAULT 0,
+  done_sites     INT           NOT NULL DEFAULT 0,
+  status         VARCHAR(16)   NOT NULL DEFAULT 'running',
+  abort_reason   VARCHAR(255)  NULL,
+  created_at     DATETIME      NOT NULL,
+  PRIMARY KEY (run_id),
+  KEY idx_campaign_runs_campaign (campaign_id, started_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

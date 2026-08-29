@@ -29,19 +29,69 @@
   var $stop = document.getElementById('stop-btn');
   var $resubmit = document.getElementById('resubmit-link');
   var $wifiPoll = document.getElementById('wifi-poll');
+  var $pollLabel = document.getElementById('poll-label');
   var $summary = document.getElementById('task-summary');
 
-  $taskId.textContent = taskId || '—';
+  function shortCode(id) {
+    if (!id) return '—';
+    return id.length > 8 ? id.slice(0, 8) : id;
+  }
+
+  // 可读编号：优先显示「T-<seq>」（数据库自增列），无 seq 时回退 taskId 短码。
+  // seq 由后端分配，进度页打开时可能尚未落库，故先显示短码，再异步拉取覆盖。
+  $taskId.textContent = shortCode(taskId);
+
+  function fetchSeq() {
+    if (!taskId) return;
+    fetch('/api/task/detail?taskId=' + encodeURIComponent(taskId), {
+      headers: { 'x-autoclaw-token': token },
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var seq = j && j.data && j.data.config && j.data.config.seq;
+        if (seq != null) $taskId.textContent = 'T-' + seq;
+      })
+      .catch(function () { /* 忽略：保持短码显示 */ });
+  }
 
   if (!taskId) {
-    $conn.textContent = '缺少 taskId';
+    // 由 campaigns.html 触发打开时，taskId 可能还没生成；自己轮询拿当前运行任务的 taskId 后刷新
+    $conn.textContent = '等待任务启动…';
+    var waitTries = 0;
+    var waitMax = 30;
+    var waitTimer = setInterval(function () {
+      waitTries++;
+      fetch('/api/campaign/state', { headers: { 'x-autoclaw-token': token } })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          var tid = j && j.data && (j.data.currentTaskId || j.data.activeTaskId);
+          if (tid) {
+            clearInterval(waitTimer);
+            location.href = '/progress.html?taskId=' + encodeURIComponent(tid);
+          } else if (waitTries >= waitMax) {
+            clearInterval(waitTimer);
+            $conn.textContent = '等待超时：未检测到运行中的任务';
+          }
+        })
+        .catch(function () {
+          if (waitTries >= waitMax) {
+            clearInterval(waitTimer);
+            $conn.textContent = '等待超时：未检测到运行中的任务';
+          }
+        });
+    }, 1000);
     return;
   }
+
+  // 拉取可读编号（T-<seq>）覆盖短码显示
+  fetchSeq();
 
   var renderedCount = 0;
   var pollTimer = null;
   // 去重：socket 实时流与初始回填轮询可能短暂重叠，同一事件时间戳唯一
   var seenKeys = {};
+  // 当前平台（google/baidu），用于决定轮询标签显示「VPN节点」还是「WIFI轮询」
+  var currentPlatform = null;
 
   // ----- 头部/状态 -----
   var STEP_LABEL = {
@@ -65,6 +115,29 @@
 
   function isTerminal(status) {
     return status === 'completed' || status === 'failed' || status === 'stopped' || status === 'paused';
+  }
+
+  // UTC ISO 字符串 → 浏览器本地时区显示（后端统一存 UTC，前端按本机时区展示）
+  // UTC 时间 → 浏览器本地时区显示（后端统一存 UTC，前端按本机时区展示）
+  // 支持：毫秒时间戳、带 Z/offset 的 ISO 字符串、'YYYY-MM-DD HH:MM:SS' 等无偏移格式。
+  // 关键：无 Z/offset 的字符串会被 JS 当成本地时间，导致时差未转；这里强制补 Z 按 UTC 解析。
+  function toLocal(iso) {
+    if (!iso) return '—';
+    var s = String(iso).trim();
+    var d;
+    if (/^\d+$/.test(s)) {
+      d = new Date(Number(s));
+    } else {
+      var normalized = s;
+      if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s)) {
+        normalized = s.replace(' ', 'T') + 'Z';
+      }
+      d = new Date(normalized);
+    }
+    if (isNaN(d.getTime())) return String(iso);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
 
   function updateStatus(status) {
@@ -122,6 +195,7 @@
     // 头部轮次显示：以事件自带的 round 为准（反映进行中的轮次）
     if (ev.round) {
       $round.textContent = ev.round.roundIndex + 1 + ' / ' + ev.round.totalRounds;
+      if (ev.round.platform) currentPlatform = ev.round.platform;
     }
 
     if (type === 'round_start' && ev.round) {
@@ -129,7 +203,7 @@
       $platform.textContent = r.platform || '—';
       $round.textContent = r.roundIndex + 1 + ' / ' + r.totalRounds;
       appendLine(
-        '<span class="t">' + escapeHtml(ev.timestamp) + '</span> ▶ 第 ' +
+        '<span class="t">' + escapeHtml(toLocal(ev.timestamp)) + '</span> ▶ 第 ' +
           (r.roundIndex + 1) + '/' + r.totalRounds + ' 轮 · <b>' + escapeHtml(r.platform) +
           '</b> · 「' + escapeHtml(r.keyword) + '」',
         'line-round',
@@ -138,14 +212,14 @@
       var s = ev.step;
       var label = STEP_LABEL[s.step] || s.step;
       appendLine(
-        '<span class="t">' + escapeHtml(ev.timestamp) + '</span> ' +
+        '<span class="t">' + escapeHtml(toLocal(ev.timestamp)) + '</span> ' +
           stepBadge(s.status) + ' ' + label + (s.detail ? ' · ' + escapeHtml(s.detail) : ''),
         s.status === 'failed' ? 'line-fail' : '',
       );
     } else if (type === 'round_end' && ev.round) {
       var re = ev.round;
       appendLine(
-        '<span class="t">' + escapeHtml(ev.timestamp) + '</span> — 第 ' + (re.roundIndex + 1) + '/' +
+        '<span class="t">' + escapeHtml(toLocal(ev.timestamp)) + '</span> — 第 ' + (re.roundIndex + 1) + '/' +
           re.totalRounds + ' 轮 结束: <b>' + (re.status === 'success' ? '成功' : '失败') + '</b>' +
           (re.error ? ' (' + escapeHtml(re.error) + ')' : ''),
         re.status === 'success' ? 'line-ok' : 'line-fail',
@@ -154,13 +228,16 @@
       if ($wifiPoll && ev.wifiTotal) {
         $wifiPoll.textContent = (ev.wifiIndex || 0) + ' / ' + ev.wifiTotal;
       }
+      if ($pollLabel) {
+        $pollLabel.textContent = currentPlatform === 'google' ? 'VPN 节点' : 'WIFI 轮询';
+      }
       appendLine(
-        '<span class="t">' + escapeHtml(ev.timestamp) + '</span> 🔄 ' + escapeHtml(ev.message),
+        '<span class="t">' + escapeHtml(toLocal(ev.timestamp)) + '</span> 🔄 ' + escapeHtml(ev.message),
         'line-round',
       );
     } else if (type === 'alert') {
       showAlert(ev.message);
-      appendLine('<span class="t">' + escapeHtml(ev.timestamp) + '</span> ⚠ ' + escapeHtml(ev.message), 'line-alert');
+      appendLine('<span class="t">' + escapeHtml(toLocal(ev.timestamp)) + '</span> ⚠ ' + escapeHtml(ev.message), 'line-alert');
     } else if (type === 'vpn_info') {
       var vm = ev.vpn || {};
       var vtxt = vm.skipped
@@ -168,11 +245,11 @@
         : '🔐 VPN 已开启：主节点可用 ' + (vm.availableCount != null ? vm.availableCount : '?') + '/' +
           (vm.total != null ? vm.total : '?') + '，已切至『' + escapeHtml(vm.usedNode || vm.current || '—') + '』' +
           (vm.proxyUrl ? '（' + escapeHtml(vm.proxyUrl) + '）' : '');
-      appendLine('<span class="t">' + escapeHtml(ev.timestamp) + '</span> ' + vtxt, 'line-round');
+      appendLine('<span class="t">' + escapeHtml(toLocal(ev.timestamp)) + '</span> ' + vtxt, 'line-round');
     } else if (type === 'task_end') {
     } else if (type === 'task_end') {
       appendLine(
-        '<span class="t">' + escapeHtml(ev.timestamp) + '</span> ■ 任务结束: <b>' +
+        '<span class="t">' + escapeHtml(toLocal(ev.timestamp)) + '</span> ■ 任务结束: <b>' +
           (STATUS_LABEL[ev.status] || ev.status) + '</b>',
         'line-round',
       );
@@ -387,7 +464,7 @@
       var err = row.error ? ' ⚠ ' + escapeHtml(row.error) : '';
       var div = document.createElement('div');
       div.className = 'log-line' + (cls ? ' ' + cls : '');
-      div.innerHTML = '<span class="t">' + escapeHtml(row.timestamp) + '</span> ' + roundTxt + statusTxt + stepTxt + msg + err;
+      div.innerHTML = '<span class="t">' + escapeHtml(toLocal(row.timestamp)) + '</span> ' + roundTxt + statusTxt + stepTxt + msg + err;
       $reviewLog.appendChild(div);
     });
     $reviewLog.scrollTop = $reviewLog.scrollHeight;

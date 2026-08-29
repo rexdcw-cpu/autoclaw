@@ -180,8 +180,26 @@ function getSqliteDb() {
         );
       }
     } catch (e) {
+      // 忽略（client 表非关键）
       // eslint-disable-next-line no-console
-      console.error('[autoclaw-db] 创建 client 表失败:', (e && e.message) ? e.message : e);
+      console.error('[autoclaw-db] 迁移 client 表失败:', (e && e.message) ? e.message : e);
+    }
+    // 幂等迁移（seq 自增展示编号）：老旧库补 seq 列 + 索引。
+    // seq 由应用层 saveTaskConfig 在 INSERT 前 SELECT MAX(seq)+1 计算写入（双后端一致）；
+    // 已存在记录 seq 为 NULL，前端回退显示 taskId 短码。
+    try {
+      const scols = sqliteDb
+        .prepare('PRAGMA table_info(task_config)')
+        .all()
+        .map((c) => c.name);
+      if (scols.length && !scols.includes('seq')) {
+        sqliteDb.exec('ALTER TABLE task_config ADD COLUMN seq INTEGER NULL');
+      }
+      // 索引：schema.sqlite.sql 对老库会因 seq 列尚不存在而失败，故统一在此创建
+      sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_task_config_seq ON task_config (seq)');
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[autoclaw-db] 迁移 task_config.seq 列失败:', (e && e.message) ? e.message : e);
     }
   }
   return sqliteDb;
@@ -335,14 +353,26 @@ async function saveTaskConfig(config, operator) {
   const s = (config && config.strategy) || {};
   const t = (config && config.target) || {};
 
+  // 自增展示编号 seq：应用层 SELECT MAX(seq)+1 计算（双后端一致，避免 SQLite 触发器语法限制）。
+  // 老库/历史记录 seq 为 NULL，前端回退显示 taskId 短码；查询失败则容错留 NULL。
+  let nextSeq = config.seq != null ? config.seq : null;
+  if (nextSeq == null) {
+    try {
+      const seqRow = await query('SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM task_config');
+      nextSeq = seqRow && seqRow[0] && seqRow[0].next != null ? seqRow[0].next : 1;
+    } catch (e) {
+      nextSeq = null;
+    }
+  }
+
   const sql =
     'INSERT INTO task_config (' +
     'task_id, platforms, keywords, target_domain, title_keywords, ' +
     'stay_seconds, scroll_up, scroll_down, amp_min, amp_max, interval_min, interval_max, ' +
     'run_mode, fail_rate_threshold, max_retry, action_timeout_ms, ' +
-    'status, operator, proxy_json, client_id, created_at' +
+    'status, operator, proxy_json, client_id, created_at, seq' +
     ') VALUES (' +
-    '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?' +
+    '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?' +
     ')';
 
   const params = [
@@ -367,6 +397,7 @@ async function saveTaskConfig(config, operator) {
     config.proxy ? JSON.stringify(config.proxy) : null,
     config.clientId || null,
     toMysqlDatetime(config.createdAt),
+    nextSeq,
   ];
 
   const result = await query(sql, params);
@@ -532,7 +563,7 @@ async function getHistory(limit, offset) {
   const sql =
     'SELECT task_id, platforms, keywords, target_domain, title_keywords, ' +
     'stay_seconds, scroll_up, scroll_down, amp_min, amp_max, interval_min, interval_max, ' +
-    'run_mode, status, client_id, created_at ' +
+    'run_mode, status, client_id, created_at, seq ' +
     'FROM task_config ORDER BY created_at DESC LIMIT ? OFFSET ?';
 
   const rows = await query(sql, [limit, offset]);
@@ -554,6 +585,7 @@ async function getHistory(limit, offset) {
     runMode: r.run_mode,
     status: r.status,
     clientId: r.client_id || null,
+    seq: r.seq != null ? r.seq : null,
     createdAt: r.created_at || null,
   }));
 }
@@ -598,7 +630,7 @@ async function getHistoryAll(limit) {
   try {
     const rows = await query(
       'SELECT task_id, platforms, keywords, target_domain, title_keywords, ' +
-      'status, client_id, created_at FROM task_config ORDER BY created_at DESC',
+      'status, client_id, created_at, seq FROM task_config ORDER BY created_at DESC',
     );
     rows.forEach((r) => {
       const item = {
@@ -609,6 +641,7 @@ async function getHistoryAll(limit) {
         titleKeywords: asArray(r.title_keywords),
         status: r.status || 'unknown',
         clientId: r.client_id || null,
+        seq: r.seq != null ? r.seq : null,
         createdAt: r.created_at || null,
         source: 'db',
       };
@@ -687,7 +720,7 @@ async function getTaskDetail(taskId) {
     const rows = await query(
       'SELECT task_id, platforms, keywords, target_domain, title_keywords, ' +
       'stay_seconds, scroll_up, scroll_down, amp_min, amp_max, interval_min, interval_max, ' +
-      'run_mode, status, client_id, created_at, proxy_json ' +
+      'run_mode, status, client_id, created_at, proxy_json, seq ' +
       'FROM task_config WHERE task_id = ?',
       [tid],
     );
@@ -711,6 +744,7 @@ async function getTaskDetail(taskId) {
         runMode: r.run_mode,
         status: r.status || 'unknown',
         clientId: r.client_id || null,
+        seq: r.seq != null ? r.seq : null,
         createdAt: r.created_at || null,
         proxy: safeParseJson(r.proxy_json),
         source: 'db',
@@ -1176,6 +1210,81 @@ async function deleteCampaign(id) {
   await query('DELETE FROM campaigns WHERE id = ?', [String(id)]);
 }
 
+// ---------------------------------------------------------------------------
+// 批量任务「每轮执行」历史（可审计）：与 campaigns.run_state（仅存当前轮、重启即清）
+// 互补，使每轮整体的起止时间 / 站点完成数 / 终态 / 中止原因可长期留存。
+// ---------------------------------------------------------------------------
+
+/**
+ * 开轮时插入一条「运行中」历史记录。
+ * @param {object} run {runId,campaignId,campaignName,startedAt,totalSites,doneSites?,status?,abortReason?,createdAt?}
+ */
+async function insertCampaignRun(run) {
+  const now = toMysqlDatetime(new Date().toISOString());
+  const sql =
+    'INSERT INTO campaign_runs ' +
+    '(run_id, campaign_id, campaign_name, started_at, finished_at, total_sites, done_sites, status, abort_reason, created_at) ' +
+    'VALUES (?,?,?,?,?,?,?,?,?,?)';
+  const params = [
+    run.runId,
+    run.campaignId,
+    run.campaignName || null,
+    Number(run.startedAt),
+    run.finishedAt != null ? Number(run.finishedAt) : null,
+    Number(run.totalSites || 0),
+    Number(run.doneSites || 0),
+    run.status || 'running',
+    run.abortReason || null,
+    run.createdAt ? toMysqlDatetime(run.createdAt) : now,
+  ];
+  await query(sql, params);
+}
+
+/**
+ * 部分更新某条轮次历史（收尾 / 累积进度）。
+ * @param {string} runId
+ * @param {object} fields {finishedAt,doneSites,status,abortReason,campaignName}
+ */
+async function updateCampaignRun(runId, fields) {
+  const sets = [];
+  const params = [];
+  const map = {
+    finishedAt: 'finished_at',
+    doneSites: 'done_sites',
+    status: 'status',
+    abortReason: 'abort_reason',
+    campaignName: 'campaign_name',
+  };
+  for (const key of Object.keys(map)) {
+    if (!(key in fields)) continue;
+    const val = fields[key];
+    sets.push(map[key] + ' = ?');
+    if (key === 'finishedAt' || key === 'doneSites') params.push(val == null ? null : Number(val));
+    else params.push(val == null ? null : val);
+  }
+  if (sets.length === 0) return;
+  params.push(String(runId));
+  await query('UPDATE campaign_runs SET ' + sets.join(', ') + ' WHERE run_id = ?', params);
+}
+
+/** 取某 campaign 的历史轮次（按开始时间倒序）。 */
+async function getCampaignRuns(campaignId, limit) {
+  const rows = await query(
+    'SELECT * FROM campaign_runs WHERE campaign_id = ? ORDER BY started_at DESC LIMIT ?',
+    [String(campaignId), Number(limit || 50)],
+  );
+  return rows;
+}
+
+/** 取某 campaign 当前仍在运行的轮次（若有，用于重启残留标记）。 */
+async function getRunningCampaignRun(campaignId) {
+  const rows = await query(
+    "SELECT * FROM campaign_runs WHERE campaign_id = ? AND status = 'running' ORDER BY started_at DESC LIMIT 1",
+    [String(campaignId)],
+  );
+  return rows.length ? rows[0] : null;
+}
+
 module.exports = {
   // DB_TYPE 主要用于调试/测试可见当前后端
   DB_TYPE,
@@ -1208,4 +1317,9 @@ module.exports = {
   updateCampaign,
   deleteCampaign,
   rowToCampaign,
+  // 批量任务「每轮执行」历史（可审计）
+  insertCampaignRun,
+  updateCampaignRun,
+  getCampaignRuns,
+  getRunningCampaignRun,
 };

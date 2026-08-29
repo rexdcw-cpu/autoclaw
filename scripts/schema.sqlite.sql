@@ -32,8 +32,13 @@ CREATE TABLE IF NOT EXISTS task_config (
   client_id          TEXT    NULL,
   created_at         TEXT    NOT NULL,
   updated_at         TEXT    NULL,
+  seq                INTEGER NULL,
   PRIMARY KEY (task_id)
 );
+
+-- 自增展示编号（seq）：task_id 已是 TEXT 主键，无法用 AUTOINCREMENT；
+-- 改由应用层（config/db.js saveTaskConfig）在 INSERT 前 SELECT MAX(seq)+1 计算并写入，
+-- 双后端（SQLite/MySQL）一致。历史记录 seq 为 NULL，前端回退显示 taskId 短码。
 
 CREATE INDEX IF NOT EXISTS idx_task_config_created ON task_config (created_at);
 CREATE INDEX IF NOT EXISTS idx_task_config_client ON task_config (client_id);
@@ -98,3 +103,22 @@ CREATE TABLE IF NOT EXISTS campaigns (
 
 CREATE INDEX IF NOT EXISTS idx_campaigns_next ON campaigns (next_run_at);
 CREATE INDEX IF NOT EXISTS idx_campaigns_enabled ON campaigns (enabled);
+
+-- 批量任务「每轮执行」历史表（可审计）：每一轮 campaign 跑一次写一条，
+-- 记录起止时间、站点总数/已完成数、终态与中止原因。与 run_state（仅存当前轮、
+-- 重启即清）互补，使每轮整体执行情况可长期留存与复盘。
+CREATE TABLE IF NOT EXISTS campaign_runs (
+  run_id         TEXT    NOT NULL,
+  campaign_id    TEXT    NOT NULL,
+  campaign_name  TEXT    NULL,
+  started_at     INTEGER NOT NULL,
+  finished_at    INTEGER NULL,
+  total_sites    INTEGER NOT NULL DEFAULT 0,
+  done_sites     INTEGER NOT NULL DEFAULT 0,
+  status         TEXT    NOT NULL DEFAULT 'running',
+  abort_reason   TEXT    NULL,
+  created_at     TEXT    NOT NULL,
+  PRIMARY KEY (run_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaign_runs_campaign ON campaign_runs (campaign_id, started_at);
