@@ -83,9 +83,10 @@ autoclaw/
 
 - **`AGENT-SETUP.md`** — **安装部署手册**：环境要求、一键安装+测试（`scripts/bootstrap.js`）、配置、启动、开机自启守护、开发踩坑清单、排错 FAQ。
 - **`USAGE-GUIDE.md`** — **日常使用手册**：拉取/更新最新代码、启动停服务、建批量任务跑任务看结果、地域节点偏好等新能力、注意事项与排错。
+- **`MIGRATION-GUIDE.md`** — **换机一键指南**：旧机重装 / 换到新机器，数据（快照分片）+ 代码完整迁移，三步恢复。
 - **`node scripts/bootstrap.js`** — 自动检测 OS → `npm install` → 跑全量单元测试（无需浏览器/数据库）；加 `--with-browser` 可顺带装 Chromium（无头服务器用）。
 
-> 两份手册分工：**装环境看 AGENT-SETUP，装完怎么用看 USAGE-GUIDE。**
+> 三份手册分工：**装环境看 AGENT-SETUP，装完怎么用看 USAGE-GUIDE，换机迁移看 MIGRATION-GUIDE。**
 
 ## 本地 / WSL 安装与运行
 
