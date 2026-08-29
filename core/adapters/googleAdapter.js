@@ -151,6 +151,52 @@ function _decodeGoogleRedirect(href) {  if (!href || typeof href !== 'string') r
   return href;
 }
 
+/**
+ * 从结果条目的文本里提取真实域名（v0.3.60）。
+ *
+ * 背景：Google 于 2026-08 把 SERP 结果链接从 `/url?q=<明文URL>` 改为
+ * `/goto?url=<protobuf 混淆串>`（形如 `CAESXgHrOzAVvRWbce...`），该串经 base64url 解码后
+ * 是 protobuf 字节流而非明文 URL，本地无法还原，导致域名匹配全部落空
+ * → 表现为「N 页均未解析到任何外链」，8/28 起谷歌任务 locate 成功率归零。
+ *
+ * 实测结论：结果条目的完整 textContent 里仍带真实域名
+ * （形如「萬年商務 maninconsultant.com https://maninconsultant.com 萬年商務一站式企業服務」），
+ * 且对真实结果块覆盖率达 100%（8/8）。故从文本提取，产出的 URL **仅用于域名匹配**，
+ * 点击链路仍走原始跳转链接（由 Google 302 到真实落地页），不改变进站行为。
+ *
+ * @param {string} text 结果条目的文本（textContent 或标题）
+ * @returns {string|null} 归一化域名（小写、去 www. 前缀）；无则 null
+ */
+function _domainFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  // 优先匹配带协议的完整 URL（最可靠，Google 通常在标题串里显示完整地址）
+  let m = text.match(/https?:\/\/([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+  // 兜底：裸域名。限定 ASCII 字母开头，避免粘连中文或误吃「Chrome 131.0.0.0」这类版本号
+  if (!m) m = text.match(/\b([a-zA-Z][a-zA-Z0-9-]*(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,})\b/);
+  if (!m) return null;
+  const host = (m[1] || '').toLowerCase();
+  if (!host || !/\.[a-zA-Z]{2,}$/.test(host)) return null;
+  return host.replace(/^www\./, '');
+}
+
+/** 相对链接绝对化时的基准源（v0.3.60） */
+const GOOGLE_ORIGIN = 'https://www.google.com';
+
+/**
+ * 判断 URL 是否仍停留在 Google 自家域（v0.3.60）。
+ * 为真说明「跳转链接未解出真实落地地址」（如 /goto?url= 混淆串），需另找真实域名。
+ * @param {string} url
+ * @returns {boolean}
+ */
+function _isGoogleOwnUrl(url) {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return /(^|\.)google(\.com?)?\.[a-z.]+$/.test(h) || h === 'google.com';
+  } catch (e) {
+    return false;
+  }
+}
+
 class GoogleAdapter extends PlatformAdapter {
   /**
    * @param {{onCaptcha?: (detail:string)=>void}} [opts]
@@ -710,7 +756,23 @@ class GoogleAdapter extends PlatformAdapter {
           ? await PlatformAdapter.resolveFinalUrl(href, 3000)
           : href;
       }
-      parsed.push({ title, href: realUrl });
+
+      // v0.3.60：Google 新版 `/goto?url=<混淆串>` 解不出明文地址，realUrl 会退回
+      // `/goto?url=...` 相对路径，造成两个后果：① 域名匹配全部落空（locate 100% 失败）；
+      // ② clickTarget 拿相对路径 goto 也会失败。
+      // 故按用途拆成两个 URL：
+      //   href     → 绝对化的可点击地址（补 Google origin，点击时由 Google 302 到真实落地页）
+      //   matchUrl → 仅用于域名匹配（仍未解出真实地址时，从条目文本提取真实域名构造）
+      const clickUrl = /^https?:\/\//i.test(realUrl)
+        ? realUrl
+        : (realUrl.startsWith('/') ? GOOGLE_ORIGIN + realUrl : realUrl);
+      let matchUrl = clickUrl;
+      if (!/^https?:\/\//i.test(matchUrl) || _isGoogleOwnUrl(matchUrl)) {
+        const fullText = await safeText(a);
+        const d = _domainFromText(fullText) || _domainFromText(title);
+        if (d) matchUrl = 'https://' + d + '/';
+      }
+      parsed.push({ title, href: clickUrl, matchUrl });
     }
     return parsed;
   }
@@ -746,12 +808,19 @@ class GoogleAdapter extends PlatformAdapter {
       allParsed.push(...parsed);
 
       // 复用基类 matchTarget：本页全部结果参与双匹配（non-strict 启用 domain-only 兜底）
-      const match = await PlatformAdapter.matchTarget(parsed, target, {
+      // v0.3.60：改用 matchUrl 参与匹配——/goto 形式下 href 是 Google 自家跳转地址，
+      // 直接拿来匹配域名必然落空；命中后按 matchUrl 反查原始 href 返回，
+      // 保证 clickTarget 拿到可点击的跳转链接（由 Google 302 到真实落地页）。
+      const matchItems = parsed.map((it) => ({ title: it.title, href: it.matchUrl || it.href }));
+      const match = await PlatformAdapter.matchTarget(matchItems, target, {
         resolve: (h) => h,
-        max: parsed.length,
+        max: matchItems.length,
         strict: false,
       });
-      if (match) return match.href;
+      if (match) {
+        const hit = parsed.find((it) => (it.matchUrl || it.href) === match.href);
+        return hit ? hit.href : match.href;
+      }
 
       // 本页未命中 → 找「下一页」继续；无下一页或已到扫描上限则停止翻页
       const nextHref = await this._findNextPageUrl(page);
@@ -786,12 +855,14 @@ class GoogleAdapter extends PlatformAdapter {
         ((document.body && document.body.innerText) || '').slice(0, 200)
       )) || '';
     } catch (e) {}
+    // v0.3.60：诊断一律基于 matchUrl——/goto 形式下 href 是 Google 自家地址，
+    // 直接用会把 seenDomains 全刷成 www.google.com，掩盖真实失败原因。
     const seenDomains = [
       ...new Set(
         allParsed
           .map((it) => {
             try {
-              return new URL(it.href).hostname;
+              return new URL(it.matchUrl || it.href).hostname;
             } catch (e) {
               return null;
             }
@@ -799,7 +870,9 @@ class GoogleAdapter extends PlatformAdapter {
           .filter(Boolean)
       ),
     ];
-    const anyDomain = allParsed.some((it) => PlatformAdapter.matchHref(it.href, target.domain));
+    const anyDomain = allParsed.some((it) =>
+      PlatformAdapter.matchHref(it.matchUrl || it.href, target.domain)
+    );
     if (!anyDomain) {
       const seenPart = seenDomains.length
         ? `。已扫描 ${scannedPages} 页实际看到的域名（前 20）：${seenDomains.slice(0, 20).join('、')}`
