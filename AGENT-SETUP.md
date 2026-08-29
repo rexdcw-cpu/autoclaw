@@ -293,7 +293,9 @@ autoclaw/
 - [ ] 复制 `.env.example` → `.env`，确认 `AUTOCLAW_DB_TYPE=sqlite`
 - [ ] 起服务后 `curl -s http://127.0.0.1:7788/api/status` 返回 `{"code":0,...}`
 - [ ] 打开 `http://localhost:7788` 能进控制台
-- [ ] **重建批量任务**：campaign 不随仓库迁移，需在 campaigns 页重新建（含各地域偏好配置）
+- [ ] **恢复历史数据**：若仓库里带了 `data/seed/autoclaw-dump.sql`，执行 `node scripts/import-db.js`
+      即可还原全部批量任务、地域偏好与运行日志（详见 USAGE-GUIDE §8）；
+      没有该文件才需要手工重建 campaign（**换机前应在旧机器先跑 `node scripts/export-db.js`**）
 - [ ] 若跑谷歌任务：确认 Mihomo 内核在跑、`127.0.0.1:7890` 已监听
 - [ ] 若需长期驻留：配 `Startup\autoclaw-autostart.vbs` 或手动跑 `autostart-autoclaw.bat`
 - [ ] 若需 Windows 可见 Chrome 过验证码：确保服务启动在**桌面登录会话**内，不是后台 Session 0

@@ -52,6 +52,10 @@ data/*_report.md
 data/*.tmp
 data/task-completion-stats.json*.tmp
 
+# 数据快照：入库压缩版 data/seed/*.sql.gz（约 1MB）；
+# 未压缩的 .sql 约 16MB，不入 git（用时由 export-db.js 现场生成）
+data/seed/*.sql
+
 # 根目录一次性脚本 / 导出 / 日志（下划线前缀约定）
 /_*.txt
 /_*.py

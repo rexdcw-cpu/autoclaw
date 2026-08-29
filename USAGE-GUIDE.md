@@ -192,15 +192,24 @@ curl -s -X POST -H "x-autoclaw-token: autoclaw-dev" \
 
 ## 6. 注意事项（按重要性排序）
 
-### 🔴 6.1 换机器 = 空库起步，批量任务要重建
+### 🔴 6.1 换机/重装前**务必先导出数据**，否则历史全丢
 
-数据库 `data/autoclaw.db` **不在 git 里**（已 `.gitignore`）。新机器首次启动会自动建表，
-但**所有批量任务、任务历史、地域偏好配置都不会带过来**。
+数据库 `data/autoclaw.db` **不在 git 里**（已 `.gitignore`），重装系统就没了。
 
-换机后必做：
-- [ ] 重新建 campaign
-- [ ] 重新填各地域偏好（如万年商务的 `TW|HK`）
-- [ ] 有需要的话，手工导出旧库 `campaigns.targets` 再导入新库
+好在只要**换机前跑一次导出**，数据就能随代码一起走（详见 §8）：
+
+```bash
+node scripts/export-db.js      # → data/seed/autoclaw-dump.sql，随后 git push
+```
+
+新机器 `git clone` 后一条命令恢复全部数据（批量任务、地域偏好、运行日志一条不漏）：
+
+```bash
+node scripts/import-db.js
+```
+
+> ⚠️ 如果**没导出就重装了**，那就真没了——新机器只能空库起步，批量任务要重建。
+> 所以这条是重装前**第一优先**要做的事。
 
 ### 🔴 6.2 改了前端必须硬刷新
 
@@ -265,11 +274,88 @@ netstat -ano | grep ":7890.*LISTENING"
 
 ---
 
-## 8. 常用命令卡
+## 8. 数据备份与迁移（换机 / 重装必读）
+
+### 8.1 为什么用 SQL dump 而不是直接复制 db 文件
+
+| 方式 | 问题 |
+|---|---|
+| 直接把 `data/autoclaw.db` 提交进 git | 二进制文件，git 每次变更都存完整副本，仓库迅速膨胀、无法 diff、无法 review |
+| **导出 SQL 文本 dump**（本项目采用） | 纯文本，git 压缩率高、可读、可 review，跨版本可恢复 |
+
+> 二进制 db 仍然被 `.gitignore` 排除；入库的是它的**文本快照** `data/seed/autoclaw-dump.sql`。
+
+### 8.2 备份（旧机器上做）
+
+```bash
+node scripts/export-db.js
+git add data/seed/autoclaw-dump.sql && git commit -m "chore: 数据快照" && git push
+```
+
+输出示例：
+
+```
+=== 导出完成 ===
+输出: data\seed\autoclaw-dump.sql
+大小: 15.25 MB
+
+  campaign_runs                 12 行
+  campaigns                     12 行
+  client                         0 行
+  task_config                   88 行
+  task_run_log               91580 行
+  --------------------------------
+  合计                       91692 行
+```
+
+**记下这个「合计」行数**，恢复后用来核对。
+
+### 8.3 恢复（新机器上做）
+
+```bash
+git pull origin master          # 拿到 dump
+node scripts/import-db.js       # 恢复到 data/autoclaw.db
+```
+
+安全设计（不用担心误操作）：
+- 目标库已存在且非空时**默认拒绝**，必须显式 `--force`；
+- 覆盖前自动把旧库备份为 `autoclaw.db.bak-<时间戳>`，不直接删；
+- 整个导入在**事务**中执行，失败则整体回滚，不会留半截数据；
+- 结束后自动跑 `integrity_check` 并打印各表记录数。
+
+### 8.4 核对是否恢复完整
+
+导入脚本会打印各表行数，与 §8.2 的「合计」对比即可。
+想更严格可手工抽查：
+
+```bash
+# 批量任务与地域偏好是否还在
+sqlite3 查询或看 campaigns 页
+
+# 或用项目自带脚本再导一次，对比行数
+node scripts/export-db.js /tmp/verify.sql
+```
+
+### 8.5 什么时候需要重新导出
+
+数据只在**跑任务**时增长。建议：
+- 重装/换机前：必导
+- 长期运行后想留档：定期导一次（dump 是快照，导出后新增的数据不会自动包含）
+
+---
+
+## 9. 常用命令卡
 
 ```bash
 # 更新代码
 git pull origin master && npm install
+
+# 备份数据（换机/重装前）
+node scripts/export-db.js
+git add data/seed/autoclaw-dump.sql && git commit -m "chore: 数据快照" && git push
+
+# 恢复数据（新机器）
+node scripts/import-db.js
 
 # 查版本
 curl -s http://127.0.0.1:7788/api/status
