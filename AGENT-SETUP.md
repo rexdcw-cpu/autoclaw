@@ -14,8 +14,8 @@
 | 技术栈 | Node.js (Express) + socket.io + Playwright(Chrome) + 持久化（SQLite 本地 / MySQL 可选） |
 | 端口 | 默认 `7788`，HTTP 控制台 + WebSocket 实时推送 |
 | 默认令牌 | `AUTOCLAW_TOKEN=autoclaw-dev`（所有 `/api/task/*` 与 socket 事件鉴权用） |
-| 仓库 | `https://github.com/rexdcw-cpu/autoclaw`（公开，默认分支 `master`） |
-| 当前版本 | 见 `package.json`（`v0.3.x` 系列），`/api/status` 返回启动时缓存的 `version` |
+| 仓库 | `https://github.com/rexdcw-cpu/autoclaw`（**需 GitHub 认证**，克隆/推送请准备 PAT；默认分支 `master`） |
+| 当前版本 | 见 `package.json`（v0.3.60），`/api/status` 返回启动时缓存的 `version` |
 
 其它权威文档（按需查阅，本手册是它们的「浓缩操作版」）：
 - `README.md` — 架构、目录结构、API 速览、环境变量总表
@@ -63,7 +63,7 @@ node scripts/bootstrap.js
 ### 方式 B：手动分步（等价于脚本）
 
 ```bash
-# 1) 取代码
+# 1) 取代码（私有仓库需认证：用户名任意，密码填 GitHub PAT）
 git clone https://github.com/rexdcw-cpu/autoclaw.git
 cd autoclaw
 
@@ -154,6 +154,30 @@ AUTOCLAW_DB_TYPE=sqlite AUTOCLAW_TOKEN=autoclaw-dev PORT=7788 node app.js
   ```
   > 注意：PowerShell 里 `taskkill //PID` 双斜杠无效，用单斜杠或 `Stop-Process`。
 
+### 4.5 Windows 开机自启与崩溃自愈（可选）
+
+`start-win.bat` 是**前台**运行（关窗即停）。若需长期驻留，用守护模式：
+
+| 文件 | 作用 |
+|---|---|
+| `autostart-guardian.js` | 守护进程：拉起 `app.js`，子进程退出后约 10 秒自动重启；单实例锁在 `data/guardian.lock` |
+| `autostart-autoclaw.bat` | 手动入口（可见窗口），以守护模式启动 |
+| `Startup\autoclaw-autostart.vbs` | 开机自启（隐藏窗口，登录触发）——**每台机器需单独配置，不随仓库走** |
+
+**重启服务的正确姿势（重要）**：
+- 改了后端代码 → 只杀 `app.js` 子进程（按端口找 PID），**守护会在约 10 秒后自动用新代码拉起**。
+  不要手动 `Start-Process node app.js`，否则会和守护抢 7788 端口。
+  ```powershell
+  netstat -ano | Select-String ":7788.*LISTENING"   # 取最后一列 PID
+  Stop-Process -Id <pid> -Force
+  ```
+- **彻底停服务**：先杀守护父进程（`data/guardian.lock` 里记的 pid），再杀子进程——只杀子进程会被自动拉回。
+- 「停止所有任务」≠ 杀服务：调 `GET /api/task/status` 取 `activeTaskId` → `POST /api/task/stop {taskId}`，
+  worker 退出后运行槽释放，服务照常运行。
+
+> GUI 限制：非交互会话（如某些自动化环境）**无法代替用户启动桌面程序**，
+> 故每个新的登录会话至少需要人工双击一次 `autostart-autoclaw.bat`，之后靠守护自愈即可。
+
 ---
 
 ## 5. 代码开发注意事项（踩坑清单）
@@ -168,11 +192,20 @@ AUTOCLAW_DB_TYPE=sqlite AUTOCLAW_TOKEN=autoclaw-dev PORT=7788 node app.js
 
 4. **谷歌持久 profile（`AUTOCLAW_GOOGLE_PERSIST_PROFILE=1`）**：复用 `data/google-profile` 累积 cookie 降验证码；**每台机器独立、含登录态，已在 `.gitignore` 排除、勿入库**；多实例并行勿共享同目录（锁竞争）；效果随 cookie 累积**渐进显现**（首次接近空身份）。
 
-5. **高标记节点软降权（默认开）**：谷歌默认把热门共享 VPN 出口（如名含 `GPT`）挪到节点池末尾；`AUTOCLAW_GOOGLE_AVOID_HOT_NODES=0` 关闭。
+5. **谷歌节点排序：地域偏好 > 软降权**（v0.3.60 起）
+   - 软降权（默认开）：把热门共享出口（名含 `GPT`）挪到节点池末尾，设 `AUTOCLAW_GOOGLE_AVOID_HOT_NODES=0` 关闭。
+   - **地域节点偏好优先**：在批量任务的站点卡片填「地域节点偏好」（如 `TW|HK`，`|` 分隔、留空不限），
+     命中该地区的节点会被**提到最前并豁免软降权**——否则会出现「节点地域明明对，却被降权排到末尾、
+     还没轮到就触发连续失败止损」的死局。
+   - ⚠️ 该配置落在**数据库**（`campaigns.targets[].preferredNodes`），换机器不会迁移，需重新配置。
 
 6. **谷歌验证码需人工过码**：极少数触发「异常流量验证拦截」时，程序在弹出的 Chrome 窗口等待，请在可见窗口内手动完成验证，检测通过自动继续（提示已降噪，每节点至多一次）。
 
-7. **运行数据不入库**：`data/google-profile/`、`data/*.db`、`data/task-stats-*.{json,md}`、`logs/*.log` 等都是运行产物，已 `.gitignore` 排除，勿提交。
+7. **运行数据不入库**：`data/google-profile/`、`data/*.db`、`data/task-stats-*.{json,md}`、`data/*.log`（worker/守护落盘日志）、`data/guardian.lock`、`logs/*.log` 等都是运行产物，已 `.gitignore` 排除，勿提交。
+
+   > **换机器 = 空库起步**：数据库不随仓库迁移。新机器首次启动会自动建表（schema 幂等），
+   > 但**所有批量任务（campaign）、任务历史、地域偏好配置都不会带过去，必须重建**。
+   > 如需搬运配置，先手工导出 `campaigns` 表的 `targets` 字段再在新库导入。
 
 8. **前端静态资源不缓存**：`app.js` 对 `public/` 强制 `no-cache`。改了前端 JS（尤其 WiFi 面板 `wifi.js`）后**必须硬刷新（Ctrl/Cmd+Shift+R）**，否则一直跑旧逻辑。
 
@@ -194,6 +227,8 @@ AUTOCLAW_DB_TYPE=sqlite AUTOCLAW_TOKEN=autoclaw-dev PORT=7788 node app.js
 | `ERR_BROWSER_LAUNCH` / Chrome 启动失败 | 服务器无桌面却没设 `AUTOCLAW_HEADLESS=1`；或 Chromium 未装/系统库缺失 | 设 `HEADLESS=1` + `npx playwright install chromium` + 装系统库 |
 | 访问 `http://域名/`（不带 `:7788`）报找不到浏览器(Linux 路径) | 命中旧 WSL 服务转发，而非新服务 | 带端口 `:7788` 访问；或清理旧服务（见 `docs/ACCESS-FAQ.md` 的 `scripts/kill-old-service.bat` / `enable-port80.bat`） |
 | 谷歌任务全败 / 卡验证码 | 出口被限流 或 触发验证拦截 | 切节点 / 开持久 profile 降权；验证码窗口内手动过码 |
+| 🔴 **所有谷歌站点同一天起集体「定位不到目标」，报「N 页均未解析到任何外链」** | **SERP 链接格式变化**——不是站点/关键词/节点问题。2026-08 起 Google 把结果链接从 `/url?q=<明文>` 改为 `/goto?url=<加密串>`，旧解码逻辑全部落空（本项目已修复于 v0.3.60） | **先做影响面判断**：按天统计各任务的 locate 成功数，若多站点同时集体归零 → 全局解析故障，去查 `core/adapters/googleAdapter.js` 的链接解码（`_decodeGoogleRedirect` / `matchUrl`）；若仅单站归零 → 才是关键词/排名问题 |
+| 排错时被「页面片段」误导 | 报错里的页面片段取自 `document.body.innerText`，**不等于搜索结果**——解析异常时会混入 AI 概览/相关推荐 | 片段里出现无关内容时，先怀疑解析链路（选择器命中数、href 形式），**不要**据此推断地域或排名 |
 | 任务失败率 >30% 被熔断 | 正常熔断策略（A4） | 看 `logs/` 与 `data/task-stats-*.md` 定位；重新提交 |
 | 改了前端没生效 | 浏览器用了旧 JS | 硬刷新（Ctrl/Cmd+Shift+R） |
 
@@ -224,23 +259,42 @@ node scripts/smoke-launch.js
 ```
 autoclaw/
 ├── app.js                  # 主进程入口：Express + socket.io + A3 鉴权
-├── package.json            # 依赖与版本（v0.3.x）
-├── start-win.bat           # Windows 一键启动（内置 sqlite）
+├── package.json            # 依赖与版本（v0.3.60）
+├── start-win.bat           # Windows 一键启动（前台，内置 sqlite）
+├── autostart-guardian.js   # 守护进程：崩溃/退出后约 10 秒自动拉起 app.js
+├── autostart-autoclaw.bat  # 守护模式手动入口（可见窗口）
 ├── scripts/
 │   ├── bootstrap.js        # ★ 跨平台一键安装+测试（本手册配套）
 │   ├── smoke-launch.js     # 浏览器启动冒烟验证
 │   ├── schema.sql          # MySQL 建表 DDL
 │   ├── schema.sqlite.sql   # SQLite 建表参考
-│   ├── worker.js           # worker 子进程（Playwright 执行）
+│   ├── worker.js           # worker 子进程（Playwright 执行；谷歌节点池排序在此）
 │   └── kill-old-service.bat / enable-port80.bat / diagnose.bat  # Windows 排错
 ├── config/  (db.js 双后端 / defaults.js 拟人参数 / site.config.js 默认站点)
-├── core/    (taskManager / taskEngine / browserSession / vpnController / adapters/*)
-├── routes/  (taskRoutes / clientRoutes / wifiRoutes)
-├── public/  (index.html 配置页 / progress.html 看板页 / css+js)
+├── core/    (scheduler 批量任务调度 / taskManager / taskEngine / browserSession /
+│            vpnController / taskConfig / adapters/{baidu,google}Adapter.js)
+├── routes/  (taskRoutes / clientRoutes / wifiRoutes / schedulerRoutes 批量任务)
+├── public/  (index.html 配置页 / campaigns.html 批量任务页 / progress.html 看板页 / css+js)
 ├── test/    (24+ 单元测试，缺浏览器/DB 时优雅 skip)
 └── docs/    (ACCESS-FAQ / arch / prd)
 ```
 
 ---
 
-**一句话上手**：`git clone` → `node scripts/bootstrap.js`（装依赖+跑测试）→ Windows 双击 `start-win.bat`（或 Linux `AUTOCLAW_DB_TYPE=sqlite AUTOCLAW_HEADLESS=1 node app.js`）→ 开 `http://localhost:7788`。
+## 9. 新机器起步检查清单（换机/交接时对照）
+
+按顺序勾完即可开跑：
+
+- [ ] `git clone` + `npm install`（私有仓库需 PAT）
+- [ ] `node scripts/bootstrap.js` 跑通（末尾 `全部单元测试通过 ✅`）
+- [ ] 复制 `.env.example` → `.env`，确认 `AUTOCLAW_DB_TYPE=sqlite`
+- [ ] 起服务后 `curl -s http://127.0.0.1:7788/api/status` 返回 `{"code":0,...}`
+- [ ] 打开 `http://localhost:7788` 能进控制台
+- [ ] **重建批量任务**：campaign 不随仓库迁移，需在 campaigns 页重新建（含各地域偏好配置）
+- [ ] 若跑谷歌任务：确认 Mihomo 内核在跑、`127.0.0.1:7890` 已监听
+- [ ] 若需长期驻留：配 `Startup\autoclaw-autostart.vbs` 或手动跑 `autostart-autoclaw.bat`
+- [ ] 若需 Windows 可见 Chrome 过验证码：确保服务启动在**桌面登录会话**内，不是后台 Session 0
+
+---
+
+**一句话上手**：`git clone` → `node scripts/bootstrap.js`（装依赖+跑测试）→ Windows 双击 `start-win.bat`（或 Linux `AUTOCLAW_DB_TYPE=sqlite AUTOCLAW_HEADLESS=1 node app.js`）→ 开 `http://localhost:7788` → 按 §9 重建批量任务。
