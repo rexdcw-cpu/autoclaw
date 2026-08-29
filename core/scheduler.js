@@ -63,6 +63,32 @@ function computeNextRun(c, fromMs) {
 }
 
 /**
+ * 规整「地域节点偏好」为大写地区前缀数组。
+ *
+ * 与 core/taskConfig.sanitizePreferredNodes 保持同语义，这里独立实现避免
+ * scheduler 依赖 taskConfig 内部私有函数（后者未导出前不可复用）。
+ *
+ * @param {string|string[]|null} raw 例：'TW|HK' / ['TW','HK']
+ * @returns {string[]} 空数组表示「未配置」（undefined 语义由调用方折叠）
+ */
+function normalizePreferredNodes(raw) {
+  if (raw == null || raw === '') return [];
+  const tokens = Array.isArray(raw)
+    ? raw.map(String)
+    : String(raw).split(/[|、,，;；\s]+/);
+  const seen = new Set();
+  const out = [];
+  for (const t of tokens) {
+    const v = String(t).trim().toUpperCase();
+    if (v && !seen.has(v)) {
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+/**
  * 规整外部传入的 campaign 规格为内部对象。
  * @param {object} spec
  * @param {string} id
@@ -90,6 +116,9 @@ function normalizeCampaignSpec(spec, id, nowIso) {
     anthropic: t.anthropic || undefined,
     humanize: t.humanize || undefined,
     clientId: t.clientId || undefined,
+    // v0.3.59：地域节点偏好（如 'TW|HK'）。target 级优先，缺省回落 campaign 级。
+    // 谷歌搜索结果高度地域化，站点只在某些出口地区排得上时，用它把对应节点前置执行。
+    preferredNodes: normalizePreferredNodes(t.preferredNodes),
   }));
   const scheduleType = spec.scheduleType === 'interval' ? 'interval' : 'daily';
   return {
@@ -104,6 +133,8 @@ function normalizeCampaignSpec(spec, id, nowIso) {
     platforms,
     pollWifi: !!spec.pollWifi,
     rememberedWifis: Array.isArray(spec.rememberedWifis) ? spec.rememberedWifis : [],
+    // v0.3.59：campaign 级地域节点偏好缺省（各 target 未单独配置时回落到此值）
+    preferredNodes: normalizePreferredNodes(spec.preferredNodes),
     targets,
     runState: null,
     lastRunAt: null,
@@ -136,9 +167,19 @@ class Scheduler {
     // 重启安全：清除任何残留运行态（上次进程死于运行中）
     for (const c of this.campaigns.values()) {
       if (c.runState) {
+        const runId = c.runState.runId;
         c.runState = null;
         // eslint-disable-next-line no-await-in-loop
         await this.db.updateCampaign(c.id, { runState: null });
+        // 历史：上一轮被重启/崩溃打断，未正常收尾 → 标记 aborted，保留审计痕迹
+        if (runId) {
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            await this.db.updateCampaignRun(runId, { finishedAt: Date.now(), status: 'aborted', abortReason: 'restarted_or_crashed' });
+          } catch (e) {
+            console.error('[scheduler] 标记残留 campaign_runs aborted 失败:', (e && e.message) ? e.message : e);
+          }
+        }
       }
     }
     if (this.timer) clearInterval(this.timer);
@@ -195,7 +236,17 @@ class Scheduler {
     if (fields.platforms != null) c.platforms = fields.platforms;
     if (fields.pollWifi != null) c.pollWifi = !!fields.pollWifi;
     if (fields.rememberedWifis != null) c.rememberedWifis = fields.rememberedWifis;
-    if (fields.targets != null) c.targets = fields.targets;
+    // v0.3.59：targets 为整体覆盖，且此处不走 create 的 normalizeCampaignSpec，
+    // 需单独规整 preferredNodes（'TW|HK' → ['TW','HK']），保证与 create 落库结构一致，
+    // 否则前端/API 传入的字符串会让 worker 的 Array.isArray 判定失败、偏好静默失效。
+    if (fields.preferredNodes != null) c.preferredNodes = normalizePreferredNodes(fields.preferredNodes);
+    if (fields.targets != null) {
+      c.targets = Array.isArray(fields.targets)
+        ? fields.targets.map((t) => (t && typeof t === 'object')
+          ? Object.assign({}, t, { preferredNodes: normalizePreferredNodes(t.preferredNodes) })
+          : t)
+        : fields.targets;
+    }
     // 调度字段变化 → 重新排程
     if (
       fields.scheduleType != null || fields.scheduleHour != null ||
@@ -238,6 +289,7 @@ class Scheduler {
     return {
       currentId: this.currentId,
       activeTaskId: this.taskManager.activeTaskId,
+      currentTaskId: this.taskManager.activeTaskId,
       campaign: c ? this._publicState(c) : null,
       campaigns: Array.from(this.campaigns.values()).map((x) => this._publicState(x)),
     };
@@ -313,6 +365,20 @@ class Scheduler {
     };
     this.currentId = c.id;
     await this.db.updateCampaign(c.id, { runState: c.runState }).catch(() => {});
+    // 历史：记录本轮开始（可审计，避免进度只活在内存/run_state，重启即丢）
+    try {
+      await this.db.insertCampaignRun({
+        runId: c.runState.runId,
+        campaignId: c.id,
+        campaignName: c.name,
+        startedAt: c.runState.startedAt,
+        totalSites: order.length,
+        doneSites: 0,
+        status: 'running',
+      });
+    } catch (e) {
+      console.error('[scheduler] 写 campaign_runs(begin) 失败:', (e && e.message) ? e.message : e);
+    }
     this._emitState(c);
     await this._submitNext(c);
   }
@@ -354,6 +420,7 @@ class Scheduler {
     if (!res || !res.ok) {
       // 提交失败（极端竞态：活跃任务抢占）→ 终止本轮，下次排程重试
       console.error('[scheduler] 提交子任务失败，终止本轮:', (res && res.code) || 'unknown');
+      c._lastAbortReason = 'submit_failed';
       await this._abortRun(c).catch(() => {});
       return;
     }
@@ -370,12 +437,20 @@ class Scheduler {
     rs.currentIndex = null;
     rs.currentTaskId = null;
     await this.db.updateCampaign(c.id, { runState: rs }).catch(() => {});
+    // 历史：累积更新已完成站点数（即便 run_state 被重启清空，历史表仍有进度）
+    if (rs.runId) {
+      try { await this.db.updateCampaignRun(rs.runId, { doneSites: rs.done.length }); }
+      catch (e) { console.error('[scheduler] 更新 campaign_runs.done 失败:', (e && e.message) ? e.message : e); }
+    }
     this._emitState(c);
     await this._submitNext(c);
   }
 
   async _completeRun(c) {
     const now = this._now();
+    const rs = c.runState;
+    const runId = rs && rs.runId;
+    const doneSites = rs ? rs.done.length : 0;
     c.lastRunAt = now;
     c.lastRunStatus = 'done';
     c.nextRunAt = computeNextRun(c, now);
@@ -387,11 +462,19 @@ class Scheduler {
       nextRunAt: c.nextRunAt,
       runState: null,
     });
+    // 历史：标记本轮完成
+    if (runId) {
+      try { await this.db.updateCampaignRun(runId, { finishedAt: now, doneSites, status: 'done' }); }
+      catch (e) { console.error('[scheduler] 更新 campaign_runs(done) 失败:', (e && e.message) ? e.message : e); }
+    }
     this._emitState(c);
   }
 
   async _abortRun(c) {
     const now = this._now();
+    const rs = c.runState;
+    const runId = rs && rs.runId;
+    const doneSites = rs ? rs.done.length : 0;
     c.lastRunAt = now;
     c.lastRunStatus = 'aborted';
     c.nextRunAt = computeNextRun(c, now);
@@ -403,6 +486,11 @@ class Scheduler {
       nextRunAt: c.nextRunAt,
       runState: null,
     });
+    // 历史：标记本轮中止
+    if (runId) {
+      try { await this.db.updateCampaignRun(runId, { finishedAt: now, doneSites, status: 'aborted', abortReason: c._lastAbortReason || 'aborted' }); }
+      catch (e) { console.error('[scheduler] 更新 campaign_runs(aborted) 失败:', (e && e.message) ? e.message : e); }
+    }
     this._emitState(c);
   }
 
@@ -415,6 +503,10 @@ class Scheduler {
     const rememberedWifis = (Array.isArray(target.rememberedWifis) && target.rememberedWifis.length)
       ? target.rememberedWifis
       : (c.rememberedWifis || []);
+    // v0.3.59：地域节点偏好，target 级优先、回落 campaign 级，都没有则空数组（不启用偏好排序）
+    const preferredNodes = (Array.isArray(target.preferredNodes) && target.preferredNodes.length)
+      ? target.preferredNodes
+      : (Array.isArray(c.preferredNodes) ? c.preferredNodes : []);
     const cfg = {
       platforms,
       keywords: target.keywords,
@@ -423,6 +515,7 @@ class Scheduler {
       browseAnchor: target.browseAnchor,
       pollWifi,
       rememberedWifis,
+      preferredNodes,
       clientId: target.clientId || null,
       taskId: crypto.randomUUID(),
     };
@@ -475,5 +568,6 @@ module.exports = {
   computeNextRun,
   shuffleArray,
   normalizeCampaignSpec,
+  normalizePreferredNodes,
   _setDeps: (d) => { DEPS = d; },
 };

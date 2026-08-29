@@ -148,6 +148,12 @@ function buildTaskConfig(payload) {
     ? payload.hiddenWifis.map(String).filter(Boolean)
     : [];
 
+  // --- 地域节点偏好（v0.3.59）：谷歌阶段 VPN 节点选择按地区前缀前置，如 'TW|HK' ---
+  // 站点地域性强时（例：台湾本地商家只有港台出口才排得上搜索结果），
+  // 靠延迟排序 / 通用降权会把真正有效的节点排到末尾甚至因止损被跳过。
+  // 配置后命中地区的节点优先执行，并豁免「高标记(GPT)节点降权」。
+  const preferredNodes = sanitizePreferredNodes(payload.preferredNodes);
+
   const taskId = payload.taskId || crypto.randomUUID();
   const rounds = buildRounds(platforms, keywords);
 
@@ -161,6 +167,7 @@ function buildTaskConfig(payload) {
     strategy: strategy,
     proxy: proxy,
     clientId: clientId,
+    preferredNodes: preferredNodes,
     pollWifi: pollWifi,
     rememberedWifis: rememberedWifis,
     hiddenWifis: hiddenWifis,
@@ -209,6 +216,32 @@ function sanitizeStrategy(raw) {
 }
 
 /**
+ * 归一化「地域节点偏好」为地区前缀数组。
+ *
+ * 用途：谷歌阶段 VPN 节点很多（日/美/越/港台…），而搜索结果排名高度地域化——
+ * 台湾本地站在日本出口下根本排不上。配置后按地区前缀把命中节点提到最前执行。
+ *
+ * 输入兼容：'TW|HK' / 'TW、HK' / 'TW, HK' / ['TW','HK']；统一转大写便于与节点名匹配。
+ * 节点名形如 '[TW]台湾中转1 中转 GPT'，地区码出现在方括号里，故用包含匹配即可。
+ *
+ * @param {string|string[]|null} raw
+ * @returns {string[]} 大写地区前缀数组（空数组表示未配置）
+ */
+function sanitizePreferredNodes(raw) {
+  const tokens = Array.isArray(raw) ? raw.map(String) : splitTokens(raw);
+  const seen = new Set();
+  const out = [];
+  for (const t of tokens) {
+    const v = String(t).trim().toUpperCase();
+    if (v && !seen.has(v)) {
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+/**
  * 归一化代理配置为统一的 { httpProxy } 形状（供 browserSession.launch 注入）。
  * 兼容多种前端/API 输入写法：
  *   - 字符串 URL：'http://1.2.3.4:8080' → { httpProxy: 'http://1.2.3.4:8080' }
@@ -248,5 +281,6 @@ module.exports = {
   orderPlatforms,
   buildRounds,
   configError,
+  sanitizePreferredNodes,
   DEFAULT_TARGET,
 };

@@ -14,7 +14,9 @@ const HEADERS = { 'Content-Type': 'application/json', 'x-autoclaw-token': TOKEN 
 const COMPANY_SITES = [
   { name: '科大万博', domain: 'www.kedawanbo.com', titleKeywords: '科大万博', keywords: '科大万博|kedawanbo' },
   { name: '万年设计', domain: 'manindesign.com', titleKeywords: '万年设计|Manin Design', keywords: '万年设计|manindesign' },
-  { name: '萬年商務', domain: 'maninconsultant.com', titleKeywords: '萬年商務|万年商务', keywords: '萬年商務|万年商务|maninconsultant' },
+  // 萬年商務为台湾本地商家：Google 结果高度地域化，只有港台出口才排得上，
+  // 故固定带地域节点偏好（其余站点暂不预设，留空＝不限地区，沿用原有行为）。
+  { name: '萬年商務', domain: 'maninconsultant.com', titleKeywords: '萬年商務|万年商务', keywords: '萬年商務|万年商务', preferredNodes: 'TW|HK' },
   { name: '地产官网', domain: 'manincap.com', titleKeywords: 'Manin Cap|万年地产', keywords: 'manincap|万年地产' },
   { name: '金門旅遊', domain: 'kammon-travel.com', titleKeywords: '金門旅遊|金门旅游', keywords: '金門旅遊|金门旅游|kammon travel' },
   { name: '移民简体', domain: 'www.maninvisa.com', titleKeywords: '万年移民|Manin Visa', keywords: '万年移民|maninvisa' },
@@ -36,6 +38,27 @@ function escAttr(s) {
 }
 function escText(s) { return escAttr(s); }
 function numOrEmpty(n) { return n == null ? '' : n; }
+
+// 站点级拟人参数默认值（与后端 config/defaults.js 保持一致，让前端表单预填可见）
+const DEFAULT_SITE_ANTHROPIC = {
+  staySeconds: 15,
+  scrollUp: 3,
+  scrollDown: 3,
+  ampMin: 300,
+  ampMax: 800,
+  intervalMin: 1,
+  intervalMax: 2,
+};
+const DEFAULT_SITE_HUMANIZE = {
+  enabled: true,
+  minMs: 800,
+  maxMs: 2600,
+  jitterAmp: 400,
+  moveProb: 0.6,
+  scrollProb: 0.25,
+  hoverProb: 0.15,
+  wheelAmp: 120,
+};
 
 function fmtTime(ms) {
   if (ms == null) return '—';
@@ -100,6 +123,10 @@ function siteCardHtml(site, idx) {
         <label>扫描页数 maxResultPages</label>
         <input type="number" min="1" max="20" data-idx="${idx}" data-field="maxResultPages" value="${numOrEmpty(site.maxResultPages)}" />
       </div>
+      <div class="col" style="grid-column: span 2">
+        <label>地域节点偏好 preferredNodes（| 分隔，如 TW|HK；留空＝不限地区）</label>
+        <input type="text" data-idx="${idx}" data-field="preferredNodes" value="${escAttr(site.preferredNodes || '')}" placeholder="留空不限，例：TW|HK" />
+      </div>
       <div class="col" style="grid-column: span 3">
         <label class="check"><input type="checkbox" data-idx="${idx}" data-field="pollWifi" ${site.pollWifi ? 'checked' : ''}/> 启用 WIFI 轮询（覆盖全站默认）</label>
       </div>
@@ -146,6 +173,9 @@ function addSite() {
     browseAnchor: '关于我们',
     pollWifi: false,
     maxResultPages: 5,
+    preferredNodes: '',
+    anthropic: { ...DEFAULT_SITE_ANTHROPIC },
+    humanize: { ...DEFAULT_SITE_HUMANIZE },
   });
   renderSites();
 }
@@ -162,6 +192,9 @@ function prefill() {
     browseAnchor: '关于我们',
     pollWifi: false,
     maxResultPages: 5,
+    preferredNodes: s.preferredNodes || '',
+    anthropic: { ...DEFAULT_SITE_ANTHROPIC },
+    humanize: { ...DEFAULT_SITE_HUMANIZE },
   }));
   renderSites();
 }
@@ -246,6 +279,8 @@ function collectForm() {
       if (s.anthropic) t.anthropic = s.anthropic;
       if (s.humanize) t.humanize = s.humanize;
       if (s.clientId) t.clientId = s.clientId;
+      // 地域节点偏好：留空表示不限地区（不传，后端回落 campaign 级/空数组）
+      if (s.preferredNodes) t.preferredNodes = s.preferredNodes;
       return t;
     }),
   };
@@ -300,8 +335,10 @@ function fillForm(c) {
     pollWifi: t.pollWifi != null ? t.pollWifi : c.pollWifi,
     rememberedWifis: t.rememberedWifis || [],
     maxResultPages: t.maxResultPages != null ? t.maxResultPages : 5,
-    anthropic: t.anthropic || undefined,
-    humanize: t.humanize || undefined,
+    // 后端存的是大写地区码数组（如 ['TW','HK']），表单里以 | 分隔字符串展示
+    preferredNodes: Array.isArray(t.preferredNodes) ? t.preferredNodes.join('|') : (t.preferredNodes || ''),
+    anthropic: t.anthropic && Object.keys(t.anthropic).length ? t.anthropic : { ...DEFAULT_SITE_ANTHROPIC },
+    humanize: t.humanize && Object.keys(t.humanize).length ? t.humanize : { ...DEFAULT_SITE_HUMANIZE },
     clientId: t.clientId || undefined,
   }));
   renderSites();
@@ -320,6 +357,37 @@ async function api(path, method, body) {
   const j = await res.json();
   if (j.code !== 0) throw new Error(j.message || j.data?.error || '请求失败');
   return j.data;
+}
+
+// ---------------------------------------------------------------------------
+// 执行过程可视化：打开 progress.html 并带上当前运行任务的 taskId
+//   关键：window.open 必须在用户点击的同步上下文里调用（否则被弹窗拦截），
+//   所以先开一个占位窗口，再用 taskId 重定向（location.href 会整页重载，progress.js 重新读取 taskId）。
+// ---------------------------------------------------------------------------
+
+// 轮询拿到当前运行任务的 taskId（站点派发后 runState.currentTaskId 才非空）
+async function getLiveTaskId(maxTries = 15) {
+  for (let i = 0; i < maxTries; i++) {
+    try {
+      const d = await api('/api/campaign/state', 'GET');
+      const tid = d && (d.currentTaskId || d.activeTaskId);
+      if (tid) return tid;
+    } catch (e) { /* 忽略，重试 */ }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return null;
+}
+
+// 在用户手势内调用：开占位窗 → 拿到 taskId 后重定向过去
+function openProgressGesture() {
+  const w = window.open('/progress.html', '_blank');
+  getLiveTaskId().then((tid) => {
+    if (tid) {
+      const url = '/progress.html?taskId=' + encodeURIComponent(tid);
+      if (w && !w.closed) w.location.href = url;
+      else window.open(url, '_blank');
+    }
+  });
 }
 
 async function loadList() {
@@ -360,6 +428,7 @@ function renderList(list) {
         </div>
         <div class="ci-actions">
           <button class="btn-small act-trigger" data-id="${c.id}">立即跑一轮</button>
+          ${running ? '<button class="btn-small act-progress" data-id="' + c.id + '">👁 查看执行过程</button>' : ''}
           <button class="btn-small act-edit" data-id="${c.id}">编辑</button>
           <button class="btn-small act-enable" data-id="${c.id}" data-enabled="${c.enabled}">${c.enabled ? '停用' : '启用'}</button>
           <button class="btn-small act-delete" data-id="${c.id}">删除</button>
@@ -386,6 +455,11 @@ function renderLive(state) {
   document.getElementById('live-bar').style.width = pct + '%';
   const cur = c.currentIndex != null && c.targets ? c.targets[c.currentIndex] : null;
   document.getElementById('live-current').textContent = cur ? `正在跑：${cur.name} (${cur.domain})` : '准备中…';
+  const liveBtn = document.getElementById('live-progress-btn');
+  if (liveBtn) {
+    liveBtn.hidden = false;
+    liveBtn.onclick = openProgressGesture; // 每次覆盖绑定，避免重复累积
+  }
 }
 
 // ---- 事件绑定 ----
@@ -445,8 +519,12 @@ document.getElementById('campaign-list').addEventListener('click', async (e) => 
   const id = btn.dataset.id;
   try {
     if (btn.classList.contains('act-trigger')) {
+      // 先开占位窗口（用户手势内，避免弹窗拦截），trigger 后再带 taskId 重定向过去
+      openProgressGesture();
       await api('/api/campaign/trigger', 'POST', { id });
       await loadList();
+    } else if (btn.classList.contains('act-progress')) {
+      openProgressGesture();
     } else if (btn.classList.contains('act-edit')) {
       const data = await api('/api/campaign/list', 'GET');
       const c = (data.list || []).find((x) => x.id === id);
@@ -472,6 +550,15 @@ if (window.io) {
 setInterval(() => {
   api('/api/campaign/state', 'GET').then(renderLive).catch(() => {});
 }, 5000);
+
+// 顶部「任务进度」导航：带当前 taskId 打开执行过程页
+const navProgress = document.getElementById('nav-progress');
+if (navProgress) {
+  navProgress.addEventListener('click', (e) => {
+    e.preventDefault();
+    openProgressGesture();
+  });
+}
 
 resetForm();
 loadList().catch((e) => {

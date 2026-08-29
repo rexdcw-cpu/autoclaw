@@ -104,6 +104,26 @@ function normalizeSsidKey(ssid) {
 }
 
 /**
+ * 归一化「地域节点偏好」为大写地区码数组（v0.3.59）。
+ *
+ * 兼容两种落库形态，避免配置来源不同导致偏好静默失效：
+ *   - 数组（create 经 normalizeCampaignSpec / taskConfig 规整）：['TW','HK']
+ *   - 字符串（update 直接覆盖、或手工改库）：'TW|HK' / 'TW、HK'
+ *
+ * @param {string|string[]|null} raw
+ * @returns {string[]} 空数组＝未配置（不启用偏好排序）
+ */
+function normalizePrefTokens(raw) {
+  if (Array.isArray(raw)) {
+    return raw.map((x) => String(x).trim().toUpperCase()).filter(Boolean);
+  }
+  if (typeof raw === 'string' && raw.trim()) {
+    return raw.split(/[|、,，;；\s]+/).map((x) => x.trim().toUpperCase()).filter(Boolean);
+  }
+  return [];
+}
+
+/**
  * 构建 WIFI 轮询序列（仅 pollWifi）：优先面板「已存」集合，回退可见且本机已存凭证。
  * 返回 { seq, usedRemembered, sourceDesc, dedupDropped }。
  */
@@ -411,22 +431,49 @@ async function runPhased(config, emit, deps) {
       // 直到成功数达标（targetCount）或 pool 耗尽（不留缺口，有多少成功算多少）。
       try {
       const pool = diag.available.slice();
+      // v0.3.59：地域节点偏好前置（campaign/target 配 preferredNodes，如 'TW|HK'）。
+      // 背景：搜索结果高度地域化——台湾本地站在日本/美国出口下根本排不上，而通用降权规则
+      // （默认 /GPT/i）恰好把港台节点全排到末尾，再叠加「连续 N 个节点定位失败即止损」，
+      // 会导致唯一有效的节点一个都没跑到（任务 31b21aae 即此坑：8 个港台节点全被跳过）。
+      // 故：命中偏好地区的节点提到最前执行，并豁免下方的高标记降权。
+      const preferredNodes = normalizePrefTokens(config.preferredNodes);
+      const preferredHit = preferredNodes.length
+        ? pool.filter((n) => {
+          const up = String(n).toUpperCase();
+          return preferredNodes.some((p) => up.indexOf(p) !== -1);
+        })
+        : [];
+      if (preferredHit.length) {
+        const rest = pool.filter((n) => preferredHit.indexOf(n) === -1);
+        pool.length = 0;
+        pool.push(...preferredHit, ...rest);
+        emit(P.makeProgress({
+          taskId: config.taskId,
+          type: EventType.VPN_INFO,
+          message: '【谷歌阶段】已按地域偏好（' + preferredNodes.join('/') + '）前置 ' + preferredHit.length +
+            ' 个节点：' + preferredHit.join('、'),
+        }));
+      }
       // v0.3.40：谷歌软降权高标记共享节点（如 [HK]香港直连HK3 GPT 这类热门出口最易被 Google 标记）。
       // 默认开启：把命中模式的节点移到 pool 末尾，优先用低标记节点；若前面成功数已达标，高标记节点不会被使用。
       // 设 AUTOCLAW_GOOGLE_AVOID_HOT_NODES=0 关闭；AUTOCLAW_GOOGLE_AVOID_NODE_PATTERN 可覆盖匹配模式（默认 /GPT/i）。
+      // v0.3.59：地域偏好命中的节点豁免降权——地域正确优先于标记风险，否则前置会被降权重新挤到末尾。
       if (process.env.AUTOCLAW_GOOGLE_AVOID_HOT_NODES !== '0') {
         const avoidPat = process.env.AUTOCLAW_GOOGLE_AVOID_NODE_PATTERN
           ? new RegExp(process.env.AUTOCLAW_GOOGLE_AVOID_NODE_PATTERN, 'i')
           : /GPT/i;
-        const hot = pool.filter((n) => avoidPat.test(n));
+        const isPreferred = (n) => preferredHit.indexOf(n) !== -1;
+        const hot = pool.filter((n) => avoidPat.test(n) && !isPreferred(n));
         if (hot.length) {
-          const safe = pool.filter((n) => !avoidPat.test(n));
+          const head = pool.filter(isPreferred);
+          const mid = pool.filter((n) => !avoidPat.test(n) && !isPreferred(n));
           pool.length = 0;
-          pool.push(...safe, ...hot);
+          pool.push(...head, ...mid, ...hot);
           emit(P.makeProgress({
             taskId: config.taskId,
             type: EventType.VPN_INFO,
-            message: '【谷歌阶段】已软降权 ' + hot.length + ' 个高标记节点（移至末尾）：' + hot.join('、'),
+            message: '【谷歌阶段】已软降权 ' + hot.length + ' 个高标记节点（移至末尾）：' + hot.join('、') +
+              (head.length ? '（其中 ' + head.length + ' 个地域偏好节点已豁免降权）' : ''),
           }));
         }
       }
@@ -446,12 +493,25 @@ async function runPhased(config, emit, deps) {
       const googleTimeoutMs = Number(process.env.AUTOCLAW_GOOGLE_ACTION_TIMEOUT) || 60000;
       // 谷歌验证码止损阈值：累计 N 个「失败且命中验证码」节点即跳过剩余（默认 3，env 可配）。
       const GOOGLE_CAPTCHA_ABORT_THRESHOLD = parseInt(process.env.AUTOCLAW_GOOGLE_CAPTCHA_ABORT, 10) || 3;
+      // 谷歌「目标排不上」连续失败止损（对齐百度）：连续 N 个节点均因「定位不到目标」失败即放弃，
+      // 避免空耗剩余 VPN 节点。env AUTOCLAW_GOOGLE_LOCFAIL_ABORT 可配。
+      const GOOGLE_LOCFAIL_ABORT_THRESHOLD = parseInt(process.env.AUTOCLAW_GOOGLE_LOCFAIL_ABORT, 10) || 3;
+      let gLocFailCount = 0;
 
       while (successCount < targetCount && pool.length > 0) {
         const node = pool.shift();
         usedOrder.push(node);
         pollIndex += 1;
         if (abort) { finalStatus = worstStatus(finalStatus, abortStatus); break; }
+        // 「目标排不上」连续失败止损（对齐百度）：连续 N 个节点均因「定位不到目标」失败即放弃剩余 VPN 节点。
+        if (gLocFailCount >= GOOGLE_LOCFAIL_ABORT_THRESHOLD) {
+          emit(P.makeProgress({
+            taskId: config.taskId,
+            type: EventType.ALERT,
+            message: '【谷歌阶段】连续 ' + gLocFailCount + ' 个节点均「定位不到目标域名」（站点未进入搜索排名），放弃剩余 ' + pool.length + ' 个 VPN 节点',
+          }));
+          break;
+        }
         let nodeAttempt = 0, gT0 = 0, gT1 = 0;
         try {
           try {
@@ -540,6 +600,13 @@ async function runPhased(config, emit, deps) {
             message: '【谷歌阶段】累计 ' + gCaptchaNodeCount + ' 个节点命中谷歌验证拦截，当前出口 IP 大概率被标记，跳过剩余 ' + pool.length + ' 个 VPN 节点',
           }));
           break; // 跳出外层 while（逐节点补跑循环）
+        }
+        // 「目标排不上」连续失败计数（对齐百度）：仅当该节点因 locateTarget（目标域名未出现）失败才累计，
+        // 成功或瞬时故障清零；连续 N 个即放弃剩余 VPN 节点。
+        if (st !== TaskStatus.COMPLETED && nodeErr && /(locateTarget|未出现在|未找到目标|目标域名[」』]?未出现)/.test(String(nodeErr))) {
+          gLocFailCount += 1;
+        } else {
+          gLocFailCount = 0;
         }
         } catch (nodeRunErr) {
           // 单节点执行异常（含浏览器原生崩溃 / 启动失败 / 超时）：记录为失败并继续换下一个备选节点补跑，
@@ -637,8 +704,13 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
   // （每个节点失败 4 次 × 120s 验证码轮询）。累计 N 个「失败且命中验证码」的节点即判定
   // 当前网络无望，跳过剩余 WIFI 节点，避免任务长期挂死。可用 env AUTOCLAW_BAIDU_CAPTCHA_ABORT 调整。
   const BAIDU_CAPTCHA_ABORT_THRESHOLD = parseInt(process.env.AUTOCLAW_BAIDU_CAPTCHA_ABORT, 10) || 3;
+  // 「目标排不上」连续失败止损：站点根本不在搜索结果里时（err=[locateTarget] 目标域名未出现在…），
+  // 逐 WIFI 节点轮询只会无限空耗（30 节点 × ~12min ≈ 6h 纯失败）。连续 N 个节点均因「定位不到目标」失败即
+  // 放弃百度阶段、进入谷歌/下一站，避免整轮被单个排不上的站点焊死。env AUTOCLAW_BAIDU_LOCFAIL_ABORT 可配。
+  const BAIDU_LOCFAIL_ABORT_THRESHOLD = parseInt(process.env.AUTOCLAW_BAIDU_LOCFAIL_ABORT, 10) || 3;
   let finalStatus = TaskStatus.COMPLETED;
   let captchaNodeCount = 0;
+  let consecutiveLocFail = 0;
 
   for (let i = 0; i < seq.length; i += 1) {
     const ssid = seq[i];
@@ -648,6 +720,16 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
       emit(P.makeProgress({
         taskId: config.taskId, type: EventType.WIFI_POLL,
         message: '【百度阶段】累计 ' + captchaNodeCount + ' 个节点命中百度安全验证，当前网络/出口大概率被风控，跳过剩余 ' + (seq.length - i) + ' 个 WIFI 节点',
+        wifiIndex: i + 1, wifiTotal: seq.length, ssid: '',
+      }));
+      break;
+    }
+    // 「目标排不上」连续失败止损：连续 N 个节点均因「定位不到目标域名」失败（站点未进入搜索排名），
+    // 放弃百度阶段、进入谷歌/下一站，避免空耗剩余 WIFI 节点（见阈值常量说明）。
+    if (consecutiveLocFail >= BAIDU_LOCFAIL_ABORT_THRESHOLD) {
+      emit(P.makeProgress({
+        taskId: config.taskId, type: EventType.WIFI_POLL,
+        message: '【百度阶段】连续 ' + consecutiveLocFail + ' 个节点均「定位不到目标域名」（站点未进入搜索排名），放弃百度阶段，避免空耗剩余 ' + (seq.length - i) + ' 个 WIFI 节点',
         wifiIndex: i + 1, wifiTotal: seq.length, ssid: '',
       }));
       break;
@@ -753,6 +835,13 @@ async function runBaiduLoop(config, baiduRounds, seq, deps) {
 
     // 仅「失败且命中验证码」的节点计入止损阈值（成功节点即便曾触发验证码也不计入，避免误判）
     if (!ok && nodeCaptcha) captchaNodeCount += 1;
+    // 「定位不到目标」连续失败计数：仅当该节点因 locateTarget（目标域名未出现在搜索结果）失败才累计；
+    // 成功节点或瞬时故障（超时等）清零，避免误伤「仅在部分网络排得上」的站点。
+    if (!ok && lastErr && /(locateTarget|未出现在|未找到目标|目标域名[」』]?未出现)/.test(lastErr)) {
+      consecutiveLocFail += 1;
+    } else {
+      consecutiveLocFail = 0;
+    }
 
     if (controlBreak) { finalStatus = terminal; break; }
     if (!ok && terminal === TaskStatus.FAILED) {
