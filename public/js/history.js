@@ -33,6 +33,29 @@
     });
   }
 
+  // UTC 时间 → 浏览器本地时区显示（后端统一存 UTC，前端按本机时区展示）
+  // 支持：毫秒时间戳、带 Z/offset 的 ISO 字符串、'YYYY-MM-DD HH:MM:SS' 等无偏移格式。
+  // 关键：无 Z/offset 的字符串会被 JS 当成本地时间，导致时差未转；这里强制补 Z 按 UTC 解析。
+  function toLocal(iso) {
+    if (!iso) return '—';
+    var s = String(iso).trim();
+    var d;
+    if (/^\d+$/.test(s)) {
+      d = new Date(Number(s));
+    } else {
+      var normalized = s;
+      // 形如 2026-08-20 06:30:04 或 2026-08-20T06:30:04（无 Z/无 offset）→ 视为 UTC
+      if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s)) {
+        normalized = s.replace(' ', 'T') + 'Z';
+      }
+      d = new Date(normalized);
+    }
+    if (isNaN(d.getTime())) return String(iso); // 非有效时间原样回退
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
   var STATUS_LABEL = {
     pending: '等待中',
     running: '运行中',
@@ -147,7 +170,7 @@
       var src = it.source === 'json' ? 'JSON' : 'DB';
       html +=
         '<tr data-tid="' + escapeHtml(it.taskId) + '">' +
-        '<td>' + escapeHtml((it.createdAt || '').slice(0, 19) || '—') + '</td>' +
+        '<td>' + escapeHtml(toLocal(it.createdAt)) + '</td>' +
         '<td><span class="' + statusClass(it.status) + '">' + escapeHtml(STATUS_LABEL[it.status] || it.status || '—') + '</span></td>' +
         '<td>' + escapeHtml(platforms) + '</td>' +
         '<td>' + escapeHtml(kw) + '</td>' +
@@ -204,7 +227,7 @@
       cell('状态', STATUS_LABEL[cfg.status] || cfg.status || '—') +
       cell('来源', cfg.source === 'json' ? '仅落盘 JSON' : '数据库') +
       cell('客户端', cfg.clientId || '—') +
-      cell('创建时间', (cfg.createdAt || '').slice(0, 19) || '—') +
+      cell('创建时间', toLocal(cfg.createdAt)) +
       cell('停留(秒)', a.staySeconds != null ? a.staySeconds : '—') +
       cell('上/下滑', (a.scrollUp != null ? a.scrollUp : '—') + ' / ' + (a.scrollDown != null ? a.scrollDown : '—')) +
       cell('幅度(px)', (a.ampMin != null ? a.ampMin : '—') + '~' + (a.ampMax != null ? a.ampMax : '—')) +
@@ -271,7 +294,7 @@
         var msg = row.message ? ' · ' + escapeHtml(row.message) : '';
         var err = row.error ? ' ⚠ ' + escapeHtml(row.error) : '';
         logHtml += '<div class="log-line' + (cls ? ' ' + cls : '') + '">' +
-          '<span class="t">' + escapeHtml(row.timestamp) + '</span> ' + roundTxt + statusTxt + stepTxt + msg + err + '</div>';
+          '<span class="t">' + escapeHtml(toLocal(row.timestamp)) + '</span> ' + roundTxt + statusTxt + stepTxt + msg + err + '</div>';
       });
       logHtml += '</div>';
     }

@@ -32,6 +32,28 @@
     }
   }
 
+  // UTC 时间 → 浏览器本地时区显示（后端统一存 UTC，前端按本机时区展示）
+  // 支持：毫秒时间戳、带 Z/offset 的 ISO 字符串、'YYYY-MM-DD HH:MM:SS' 等无偏移格式。
+  // 关键：无 Z/offset 的字符串会被 JS 当成本地时间，导致时差未转；这里强制补 Z 按 UTC 解析。
+  function toLocal(iso) {
+    if (!iso) return '—';
+    var s = String(iso).trim();
+    var d;
+    if (/^\d+$/.test(s)) {
+      d = new Date(Number(s));
+    } else {
+      var normalized = s;
+      if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s)) {
+        normalized = s.replace(' ', 'T') + 'Z';
+      }
+      d = new Date(normalized);
+    }
+    if (isNaN(d.getTime())) return String(iso);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+      ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
   function showError(msg) {
     errorEl.textContent = msg;
     errorEl.hidden = false;
@@ -250,7 +272,7 @@
       o.value = item.taskId || '';
       var dom = item.targetDomain || '';
       var kw = Array.isArray(item.keywords) ? item.keywords.join('|') : (item.keywords || '');
-      o.textContent = (item.createdAt || '').slice(0, 19) + ' · ' + dom + ' · ' + kw;
+      o.textContent = toLocal(item.createdAt) + ' · ' + dom + ' · ' + kw;
       historySel.appendChild(o);
     });
   }
