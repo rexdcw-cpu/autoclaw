@@ -7,13 +7,13 @@
     <link rel="stylesheet" href="/css/style.css" />
     <style>
       .site-card {
-        border: 1px solid #d8dee6;
+        border: 1px solid var(--border);
         border-radius: 10px;
         padding: 14px 16px;
         margin-bottom: 14px;
-        background: #fbfcfe;
+        background: var(--panel);
       }
-      .site-card.disabled-site { opacity: 0.55; background: #f2f3f5; }
+      .site-card.disabled-site { opacity: 0.55; background: var(--panel-2); }
       .site-head {
         display: flex;
         align-items: center;
@@ -27,26 +27,38 @@
         gap: 10px 16px;
       }
       .site-grid .col { display: flex; flex-direction: column; gap: 4px; }
-      .site-grid label { font-size: 12px; color: #5b6573; }
+      .site-grid label { font-size: 12px; color: var(--muted); font-weight: 500; }
       .site-grid input[type="text"],
       .site-grid input[type="number"],
       .site-grid textarea {
         width: 100%;
         box-sizing: border-box;
         padding: 6px 8px;
-        border: 1px solid #cfd6df;
+        border: 1px solid var(--border);
         border-radius: 6px;
         font-size: 13px;
+        background: var(--panel);
+        color: var(--text);
+      }
+      .site-grid input::placeholder,
+      .site-grid textarea::placeholder { color: #94a3b8; }
+      .site-grid input:focus,
+      .site-grid textarea:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.12);
       }
       .site-grid textarea { min-height: 52px; resize: vertical; }
       .site-platforms { display: flex; gap: 14px; align-items: center; padding-top: 4px; }
       .site-actions { margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap; }
-      .btn-danger { background: #e5534b; color: #fff; border: none; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
-      .btn-danger:hover { background: #cf3f37; }
-      details.adv { margin-top: 10px; border-top: 1px dashed #d8dee6; padding-top: 8px; }
-      details.adv summary { cursor: pointer; font-size: 13px; color: #3b6ea5; }
+      .btn-danger { background: var(--fail); color: #fff; border: none; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-weight: 600; }
+      .btn-danger:hover { background: #991b1b; }
+      details.adv { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
+      details.adv summary { cursor: pointer; font-size: 13px; color: var(--accent); font-weight: 500; }
       .sites-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-      .sites-count { font-size: 13px; color: #5b6573; }
+      .sites-count { font-size: 13px; color: var(--muted); }
+      .progress-bar { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin-top: 8px; border: 1px solid var(--border); }
+      .progress-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.3s ease; }
     </style>
   </head>
   <body>
@@ -55,7 +67,7 @@
         <h1>autoclaw · 批量定时任务</h1>
         <nav class="nav-links">
           <a class="link-home" href="/">任务配置</a>
-          <a class="link-home" href="/progress.html">任务进度</a>
+          <a class="link-home" id="nav-progress" href="/progress.html">任务进度</a>
           <a class="link-home" href="/history.html">任务历史</a>
         </nav>
       </header>
@@ -73,6 +85,7 @@
           <div><strong id="live-name"></strong> <span id="live-progress" class="badge"></span></div>
           <div class="progress-bar"><div id="live-bar" class="progress-fill"></div></div>
           <div id="live-current" class="hint"></div>
+          <button type="button" id="live-progress-btn" class="btn-small" hidden style="margin-top:10px">👁 查看执行过程</button>
         </div>
       </section>
 
