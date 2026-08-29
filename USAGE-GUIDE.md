@@ -199,7 +199,7 @@ curl -s -X POST -H "x-autoclaw-token: autoclaw-dev" \
 好在只要**换机前跑一次导出**，数据就能随代码一起走（详见 §8）：
 
 ```bash
-node scripts/export-db.js      # → data/seed/autoclaw-dump.sql，随后 git push
+node scripts/export-db.js      # → data/seed/autoclaw-dump.part*.sql.gz，随后 git push
 ```
 
 新机器 `git clone` 后一条命令恢复全部数据（批量任务、地域偏好、运行日志一条不漏）：
@@ -276,28 +276,30 @@ netstat -ano | grep ":7890.*LISTENING"
 
 ## 8. 数据备份与迁移（换机 / 重装必读）
 
-### 8.1 为什么用 SQL dump 而不是直接复制 db 文件
+### 8.1 为什么是「SQL 文本 + 分片压缩」
 
-| 方式 | 问题 |
+| 做法 | 问题 |
 |---|---|
 | 直接把 `data/autoclaw.db` 提交进 git | 二进制文件，git 每次变更都存完整副本，仓库迅速膨胀、无法 diff、无法 review |
-| **导出 SQL 文本 dump**（本项目采用） | 纯文本，git 压缩率高、可读、可 review，跨版本可恢复 |
+| 导出成单个 SQL 文件（15 MB） | 体积仍太大，推送容易被连接重置 |
+| **SQL 文本 + 按表分片 + gzip**（本项目采用） | 纯文本可压缩可 review；每片仅几百 KB，推送稳定 |
 
-> 二进制 db 仍然被 `.gitignore` 排除；入库的是它的**文本快照** `data/seed/autoclaw-dump.sql`。
+> 二进制 db 与未压缩的 `data/seed/*.sql` 都被 `.gitignore` 排除；
+> 入库的是**分片压缩包** `data/seed/autoclaw-dump.part01..05.sql.gz`。
 
 ### 8.2 备份（旧机器上做）
 
 ```bash
 node scripts/export-db.js
-git add data/seed/autoclaw-dump.sql && git commit -m "chore: 数据快照" && git push
+git add data/seed/autoclaw-dump.part*.sql.gz && git commit -m "data: 数据快照" && git push
 ```
 
 输出示例：
 
 ```
-=== 导出完成 ===
-输出: data\seed\autoclaw-dump.sql
-大小: 15.25 MB
+=== 导出完成（分片）===
+输出目录: data\seed
+每片行数: 25000
 
   campaign_runs                 12 行
   campaigns                     12 行
@@ -306,22 +308,36 @@ git add data/seed/autoclaw-dump.sql && git commit -m "chore: 数据快照" && gi
   task_run_log               91580 行
   --------------------------------
   合计                       91692 行
+
+  autoclaw-dump.part01.sql.gz             8 KB   表结构 + 基础数据
+  autoclaw-dump.part02.sql.gz           276 KB   task_run_log 行 0~25000
+  autoclaw-dump.part03.sql.gz           281 KB   task_run_log 行 25000~50000
+  autoclaw-dump.part04.sql.gz           281 KB   task_run_log 行 50000~75000
+  autoclaw-dump.part05.sql.gz           197 KB   task_run_log 行 75000~91580
 ```
 
-**记下这个「合计」行数**，恢复后用来核对。
+**记下「合计」行数**，恢复后用来核对。
+
+> 可选参数：`--chunk 50000` 改每片行数，`--outdir <目录>` 改输出位置。
+> 分片数量变多时，导出脚本会提示清理旧的残留分片（务必删掉，否则恢复时会被一起导入）。
 
 ### 8.3 恢复（新机器上做）
 
 ```bash
-git pull origin master          # 拿到 dump
-node scripts/import-db.js       # 恢复到 data/autoclaw.db
+git pull origin master          # 拿到所有分片
+node scripts/import-db.js       # 自动按序导入全部分片 → data/autoclaw.db
 ```
+
+导入脚本会自动扫描 `data/seed/` 下所有 `autoclaw-dump.part*.sql.gz` 并按文件名顺序导入，
+**不需要手工指定分片**。若目录下只有单个 dump 文件（旧格式），也自动兼容。
 
 安全设计（不用担心误操作）：
 - 目标库已存在且非空时**默认拒绝**，必须显式 `--force`；
 - 覆盖前自动把旧库备份为 `autoclaw.db.bak-<时间戳>`，不直接删；
-- 整个导入在**事务**中执行，失败则整体回滚，不会留半截数据；
+- 逐片导入，任一片失败立即停止并提示（不会静默丢数据）；
 - 结束后自动跑 `integrity_check` 并打印各表记录数。
+
+> 前置条件：需先装好依赖（`npm install`），否则会提示「缺少 better-sqlite3」。
 
 ### 8.4 核对是否恢复完整
 
@@ -352,7 +368,7 @@ git pull origin master && npm install
 
 # 备份数据（换机/重装前）
 node scripts/export-db.js
-git add data/seed/autoclaw-dump.sql && git commit -m "chore: 数据快照" && git push
+git add data/seed/autoclaw-dump.part*.sql.gz && git commit -m "data: 数据快照" && git push
 
 # 恢复数据（新机器）
 node scripts/import-db.js
